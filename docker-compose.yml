@@ -1,0 +1,189 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hospital-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hospital_sim}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-hospital_sim}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: hospital-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-hospital_sim}
+      JWT_SECRET: dynatrace-demo-secret
+      CORS_ORIGIN: http://localhost:${FRONTEND_PORT:-5173},http://frontend
+      DEFAULT_ADMIN_ENABLED: ${DEFAULT_ADMIN_ENABLED:-true}
+      DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@hospital.local}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-dyantrace}
+      DEFAULT_ADMIN_NAME: ${DEFAULT_ADMIN_NAME:-Administrador Padrao}
+      DEFAULT_ADMIN_DEPARTMENT: ${DEFAULT_ADMIN_DEPARTMENT:-NOC Hospitalar}
+      SEED_PATIENTS: 5000
+      SEED_DOCTORS: 90
+      SEED_APPOINTMENTS: 22000
+      SEED_EXAMS: 17000
+      SIMULATION_CONTROL_KEY: ${SIMULATION_CONTROL_KEY:-troque-esta-chave-forte}
+      SIMULATION_JOB_ENABLED: ${SIMULATION_JOB_ENABLED:-true}
+      SIMULATION_JOB_MODE: ${SIMULATION_JOB_MODE:-interval}
+      SIMULATION_JOB_INTERVAL_MINUTES: ${SIMULATION_JOB_INTERVAL_MINUTES:-30}
+      SIMULATION_JOB_CRON: "${SIMULATION_JOB_CRON:-*/30 * * * *}"
+      SIMULATION_JOB_TIMEZONE: ${SIMULATION_JOB_TIMEZONE:-America/Sao_Paulo}
+      SIMULATION_JOB_PROFILE: ${SIMULATION_JOB_PROFILE:-light}
+      SIMULATION_JOB_ROLES: ${SIMULATION_JOB_ROLES:-patient,doctor,receptionist}
+      SIMULATION_JOB_RUN_ON_START: ${SIMULATION_JOB_RUN_ON_START:-true}
+      SIMULATION_JOB_START_DELAY_SECONDS: ${SIMULATION_JOB_START_DELAY_SECONDS:-20}
+      SIMULATION_JOB_SESSIONS: ${SIMULATION_JOB_SESSIONS:-40}
+      SIMULATION_JOB_DURATION_SECONDS: ${SIMULATION_JOB_DURATION_SECONDS:-300}
+      SIMULATION_JOB_RAMP_UP_SECONDS: ${SIMULATION_JOB_RAMP_UP_SECONDS:-30}
+      SIMULATION_JOB_REQUEST_PACING_MS: ${SIMULATION_JOB_REQUEST_PACING_MS:-1200}
+      SIMULATION_JOB_JITTER_MS: ${SIMULATION_JOB_JITTER_MS:-450}
+    ports:
+      - "${BACKEND_PORT:-4000}:4000"
+    volumes:
+      - backend_tmp:/app/tmp
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:4000/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:${BACKEND_PORT:-4000}
+    container_name: hospital-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  control-panel:
+    build:
+      context: ./control-panel
+    container_name: hospital-control-panel
+    restart: unless-stopped
+    environment:
+      PORT: 4180
+      CONTROL_PANEL_USER: ${CONTROL_PANEL_USER:-admin}
+      CONTROL_PANEL_PASSWORD: ${CONTROL_PANEL_PASSWORD:-dyantrace}
+      CONTROL_PANEL_SESSION_SECRET: ${CONTROL_PANEL_SESSION_SECRET:-troque-esta-sessao}
+      CONTROL_PANEL_SESSION_TTL_SECONDS: ${CONTROL_PANEL_SESSION_TTL_SECONDS:-28800}
+      APP_FRONTEND_CONTAINER: hospital-frontend
+      APP_BACKEND_CONTAINER: hospital-backend
+      APP_POSTGRES_CONTAINER: hospital-postgres
+      BACKEND_INTERNAL_URL: http://backend:4000
+      DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@hospital.local}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-dyantrace}
+      SIMULATION_CONTROL_KEY: ${SIMULATION_CONTROL_KEY:-troque-esta-chave-forte}
+    ports:
+      - "${CONTROL_PANEL_PORT:-5180}:4180"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:4180/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  k6-load:
+    image: grafana/k6:0.54.0
+    container_name: hospital-k6
+    profiles: ["load"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://backend:4000/api
+    volumes:
+      - ./load:/scripts:ro
+    command: ["run", "/scripts/k6-hospital.js"]
+
+  rum-browser-load:
+    image: grafana/k6:0.54.0-with-browser
+    profiles: ["rum"]
+    network_mode: host
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    environment:
+      FRONTEND_URL: http://localhost:${FRONTEND_PORT:-5173}
+      RUM_BROWSER_VUS: ${RUM_BROWSER_VUS:-5}
+      RUM_BROWSER_DURATION: ${RUM_BROWSER_DURATION:-3m}
+      K6_BROWSER_HEADLESS: ${K6_BROWSER_HEADLESS:-true}
+      K6_BROWSER_ARGS: ${K6_BROWSER_ARGS:-no-sandbox}
+    volumes:
+      - ./load:/scripts:ro
+    command: ["run", "/scripts/k6-rum-browser.js"]
+
+  dynatrace-oneagent:
+    image: dynatrace/oneagent:latest
+    container_name: dynatrace-oneagent
+    profiles: ["dynatrace"]
+    restart: on-failure:5
+    pid: host
+    network_mode: host
+    read_only: ${ONEAGENT_CONTAINER_READ_ONLY:-true}
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+      - FOWNER
+      - FSETID
+      - KILL
+      - NET_ADMIN
+      - NET_RAW
+      - SETFCAP
+      - SETGID
+      - SETPCAP
+      - SETUID
+      - SYS_ADMIN
+      - SYS_CHROOT
+      - SYS_PTRACE
+      - SYS_RESOURCE
+    security_opt:
+      - apparmor:unconfined
+    environment:
+      ONEAGENT_ENABLE_VOLUME_STORAGE: ${ONEAGENT_ENABLE_VOLUME_STORAGE:-true}
+      ONEAGENT_INSTALLER_SCRIPT_URL: ${ONEAGENT_INSTALLER_SCRIPT_URL:-}
+      ONEAGENT_INSTALLER_DOWNLOAD_TOKEN: ${ONEAGENT_INSTALLER_DOWNLOAD_TOKEN:-}
+      ONEAGENT_INSTALLER_SKIP_CERT_CHECK: ${ONEAGENT_INSTALLER_SKIP_CERT_CHECK:-false}
+      ONEAGENT_NO_REMOUNT_ROOT: ${ONEAGENT_NO_REMOUNT_ROOT:-}
+    volumes:
+      - /:/mnt/root:${ONEAGENT_HOST_ROOT_MOUNT_MODE:-ro}
+      - oneagent_storage:/mnt/volume_storage_mount
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  postgres_data:
+  backend_tmp:
+  oneagent_storage:

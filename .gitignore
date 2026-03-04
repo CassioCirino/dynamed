@@ -1,0 +1,8 @@
+backend/node_modules
+frontend/node_modules
+control-panel/node_modules
+frontend/dist
+backend/tmp
+.oneagent_storage
+.env
+*.log

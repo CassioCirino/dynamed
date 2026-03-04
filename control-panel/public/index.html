@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Painel de Cenarios</title>
+    <style>
+      :root {
+        --bg: #0a1521;
+        --panel: #102538;
+        --panel-2: #153047;
+        --text: #ecf4ff;
+        --muted: #9bb5cf;
+        --ok: #2fc58d;
+        --warn: #f3b63e;
+        --danger: #ff5d67;
+        --border: #1f4666;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: radial-gradient(circle at top left, #13314a 0%, var(--bg) 55%);
+        color: var(--text);
+      }
+
+      .wrap {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 2rem;
+      }
+
+      .subtitle {
+        margin: 0 0 18px;
+        color: var(--muted);
+      }
+
+      .panel {
+        background: linear-gradient(160deg, rgba(17, 43, 64, 0.95), rgba(11, 28, 43, 0.95));
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 14px;
+        margin-bottom: 14px;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      .login-grid,
+      .row,
+      .card-grid {
+        display: grid;
+        gap: 10px;
+      }
+
+      .login-grid {
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        align-items: end;
+      }
+
+      .card-grid {
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+
+      input {
+        width: 100%;
+        background: #071421;
+        border: 1px solid #245375;
+        color: var(--text);
+        border-radius: 10px;
+        padding: 10px 12px;
+      }
+
+      select {
+        width: 100%;
+        background: #071421;
+        border: 1px solid #245375;
+        color: var(--text);
+        border-radius: 10px;
+        padding: 10px 12px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .btn-primary {
+        background: #3bc4d5;
+        color: #03212c;
+      }
+
+      .btn-danger {
+        background: #c74453;
+        color: #fff;
+      }
+
+      .btn-neutral {
+        background: #264e6d;
+        color: #e8f2ff;
+      }
+
+      .btn-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .role-row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .role-row label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .role-row input[type="checkbox"] {
+        width: auto;
+      }
+
+      .tag {
+        display: inline-block;
+        font-size: 0.8rem;
+        border-radius: 999px;
+        padding: 4px 9px;
+        margin-top: 4px;
+      }
+
+      .tag-ok {
+        background: rgba(47, 197, 141, 0.2);
+        color: var(--ok);
+      }
+
+      .tag-warn {
+        background: rgba(243, 182, 62, 0.2);
+        color: var(--warn);
+      }
+
+      .tag-danger {
+        background: rgba(255, 93, 103, 0.2);
+        color: var(--danger);
+      }
+
+      .tiny {
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .message {
+        border-radius: 10px;
+        padding: 10px;
+        margin: 10px 0;
+        font-weight: 600;
+      }
+
+      .msg-ok {
+        background: rgba(47, 197, 141, 0.15);
+        border: 1px solid rgba(47, 197, 141, 0.4);
+      }
+
+      .msg-error {
+        background: rgba(255, 93, 103, 0.15);
+        border: 1px solid rgba(255, 93, 103, 0.4);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>Painel de Cenarios da Demonstracao</h1>
+      <p class="subtitle">Controle separado do app principal. Ideal para apresentacao ao vivo.</p>
+
+      <section class="panel" id="loginPanel">
+        <h2>Login do painel</h2>
+        <div class="login-grid">
+          <label>
+            Usuario
+            <input id="username" placeholder="admin" />
+          </label>
+          <label>
+            Senha
+            <input id="password" type="password" placeholder="dyantrace" />
+          </label>
+          <button class="btn-primary" id="loginBtn">Entrar</button>
+        </div>
+      </section>
+
+      <section id="appPanel" class="hidden">
+        <div id="message"></div>
+
+        <section class="panel">
+          <h2>Status rapido</h2>
+          <div class="card-grid" id="statusGrid"></div>
+          <p class="tiny" id="refreshInfo"></p>
+        </section>
+
+        <section class="panel">
+          <h2>Simulacao de carga de usuarios</h2>
+          <div class="card-grid">
+            <label>
+              Perfil
+              <select id="loadProfile">
+                <option value="light">Leve</option>
+                <option value="moderate" selected>Medio</option>
+                <option value="heavy">Alto</option>
+                <option value="extreme">Extremo</option>
+                <option value="custom">Customizado</option>
+              </select>
+            </label>
+            <label>
+              Sessoes simultaneas
+              <input id="loadSessions" type="number" min="1" max="600" value="90" />
+            </label>
+            <label>
+              Duracao (segundos)
+              <input id="loadDuration" type="number" min="30" max="7200" value="300" />
+            </label>
+            <label>
+              Ramp-up (segundos)
+              <input id="loadRamp" type="number" min="0" max="900" value="35" />
+            </label>
+            <label>
+              Ritmo base (ms)
+              <input id="loadPacing" type="number" min="200" max="20000" value="1300" />
+            </label>
+            <label>
+              Variacao (ms)
+              <input id="loadJitter" type="number" min="0" max="10000" value="500" />
+            </label>
+          </div>
+          <div class="role-row" style="margin: 12px 0">
+            <label><input type="checkbox" class="load-role" value="patient" checked /> Paciente</label>
+            <label><input type="checkbox" class="load-role" value="doctor" checked /> Medico</label>
+            <label><input type="checkbox" class="load-role" value="receptionist" checked /> Recepcao</label>
+            <label><input type="checkbox" class="load-role" value="admin" /> Operacoes</label>
+          </div>
+          <div class="btn-row">
+            <button class="btn-primary" id="loadStartBtn">Iniciar carga</button>
+            <button class="btn-neutral" id="loadStopBtn">Parar carga</button>
+          </div>
+          <p class="tiny" id="info-synthetic-load"></p>
+          <p class="tiny" id="info-load-state"></p>
+        </section>
+
+        <section class="panel">
+          <h2>Cenarios de indisponibilidade</h2>
+          <div class="card-grid">
+            <article class="panel">
+              <h3>DEV - Frontend indisponivel</h3>
+              <label>Duração (segundos) <input id="durFront" type="number" min="30" value="120" /></label>
+              <div class="btn-row">
+                <button class="btn-danger" data-action="start" data-id="dev-front" data-duration-id="durFront">Iniciar</button>
+                <button class="btn-neutral" data-action="stop" data-id="dev-front">Encerrar</button>
+              </div>
+              <p class="tiny" id="info-dev-front"></p>
+            </article>
+
+            <article class="panel">
+              <h3>DEV - API indisponivel</h3>
+              <label>Duração (segundos) <input id="durApi" type="number" min="30" value="120" /></label>
+              <div class="btn-row">
+                <button class="btn-danger" data-action="start" data-id="dev-api" data-duration-id="durApi">Iniciar</button>
+                <button class="btn-neutral" data-action="stop" data-id="dev-api">Encerrar</button>
+              </div>
+              <p class="tiny" id="info-dev-api"></p>
+            </article>
+
+            <article class="panel">
+              <h3>Banco - PostgreSQL indisponivel</h3>
+              <label>Duração (segundos) <input id="durDb" type="number" min="30" value="120" /></label>
+              <div class="btn-row">
+                <button class="btn-danger" data-action="start" data-id="db" data-duration-id="durDb">Iniciar</button>
+                <button class="btn-neutral" data-action="stop" data-id="db">Encerrar</button>
+              </div>
+              <p class="tiny" id="info-db"></p>
+            </article>
+          </div>
+          <div class="btn-row">
+            <button class="btn-neutral" id="stopAllBtn">Parada geral (carga + problemas)</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Infra - Pressao de CPU</h2>
+          <div class="card-grid">
+            <label>
+              Duração (segundos)
+              <input id="cpuSeconds" type="number" min="30" value="180" />
+            </label>
+            <label>
+              Intensidade (0.05 a 1)
+              <input id="cpuIntensity" type="number" min="0.05" max="1" step="0.01" value="0.95" />
+            </label>
+            <label>
+              Workers
+              <input id="cpuWorkers" type="number" min="1" max="16" value="4" />
+            </label>
+          </div>
+          <div class="btn-row">
+            <button class="btn-primary" id="cpuStartBtn">Iniciar pressao de CPU</button>
+            <button class="btn-neutral" id="cpuStopBtn">Encerrar CPU agora</button>
+          </div>
+          <p class="tiny" id="info-infra-cpu"></p>
+        </section>
+      </section>
+    </main>
+
+    <script>
+      const tokenKey = "painel_cenarios_token";
+      let token = localStorage.getItem(tokenKey) || "";
+
+      const loginPanel = document.getElementById("loginPanel");
+      const appPanel = document.getElementById("appPanel");
+      const messageEl = document.getElementById("message");
+      const statusGrid = document.getElementById("statusGrid");
+      const refreshInfo = document.getElementById("refreshInfo");
+
+      function showMessage(type, text) {
+        if (!text) {
+          messageEl.innerHTML = "";
+          return;
+        }
+        messageEl.innerHTML = `<div class="message ${type === "error" ? "msg-error" : "msg-ok"}">${text}</div>`;
+      }
+
+      function authHeaders() {
+        return {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        };
+      }
+
+      function setLoggedIn(loggedIn) {
+        loginPanel.classList.toggle("hidden", loggedIn);
+        appPanel.classList.toggle("hidden", !loggedIn);
+      }
+
+      function formatRemaining(seconds) {
+        const s = Number(seconds || 0);
+        if (s <= 0) return "0s";
+        const min = Math.floor(s / 60);
+        const rem = s % 60;
+        if (!min) return `${rem}s`;
+        return rem ? `${min}min ${rem}s` : `${min}min`;
+      }
+
+      function renderContainerStatus(containers) {
+        const entries = [
+          { key: "frontend", label: "Frontend" },
+          { key: "backend", label: "Backend API" },
+          { key: "postgres", label: "PostgreSQL" },
+        ];
+
+        statusGrid.innerHTML = entries
+          .map((entry) => {
+            const item = containers?.[entry.key];
+            const running = item?.state === "running";
+            const tagClass = running ? "tag-ok" : "tag-danger";
+            const tagText = running ? "Ativo" : "Parado";
+            const statusText = item?.status || "Nao encontrado";
+            return `
+              <article class="panel">
+                <h3>${entry.label}</h3>
+                <span class="tag ${tagClass}">${tagText}</span>
+                <p class="tiny">${statusText}</p>
+              </article>
+            `;
+          })
+          .join("");
+      }
+
+      function setScenarioInfo(id, scenario) {
+        const target = document.getElementById(`info-${id}`);
+        if (!target) return;
+        if (!scenario || !scenario.running) {
+          target.textContent = "Inativo.";
+          return;
+        }
+        target.textContent = `Ativo. Restante: ${formatRemaining(scenario.remainingSeconds)}.`;
+      }
+
+      function renderLoadState(load, loadError) {
+        const target = document.getElementById("info-load-state");
+        if (!target) return;
+
+        if (loadError) {
+          target.textContent = `Carga backend: ${loadError}`;
+          return;
+        }
+        if (!load) {
+          target.textContent = "Carga backend: sem resposta no momento.";
+          return;
+        }
+        if (!load.running) {
+          target.textContent = "Carga backend: parada.";
+          return;
+        }
+
+        const profile = load?.config?.profile || "-";
+        const activeSessions = load?.activeSessions || 0;
+        const requests = load?.stats?.totalRequests || 0;
+        const errors = load?.stats?.totalErrors || 0;
+        target.textContent = `Carga ativa | perfil=${profile} | sessoes ativas=${activeSessions} | requisicoes=${requests} | erros=${errors}`;
+      }
+
+      async function refreshStatus() {
+        if (!token) return;
+        try {
+          const res = await fetch("/api/status", { headers: authHeaders() });
+          if (res.status === 401) {
+            token = "";
+            localStorage.removeItem(tokenKey);
+            setLoggedIn(false);
+            showMessage("error", "Sessao expirada. Faca login novamente.");
+            return;
+          }
+          const data = await res.json();
+          renderContainerStatus(data.containers || {});
+          setScenarioInfo("dev-front", data.scenarios?.["dev-front"]);
+          setScenarioInfo("dev-api", data.scenarios?.["dev-api"]);
+          setScenarioInfo("db", data.scenarios?.["db"]);
+          setScenarioInfo("infra-cpu", data.scenarios?.["infra-cpu"]);
+          setScenarioInfo("synthetic-load", data.scenarios?.["synthetic-load"]);
+          renderLoadState(data.load, data.loadError);
+          refreshInfo.textContent = `Ultima atualizacao: ${new Date().toLocaleTimeString("pt-BR")}`;
+        } catch (error) {
+          showMessage("error", `Falha ao atualizar status: ${error.message}`);
+        }
+      }
+
+      async function apiCall(path, payload = {}) {
+        const res = await fetch(path, {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify(payload),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(body?.message || "Falha na operacao.");
+        }
+        return body;
+      }
+
+      async function onLogin() {
+        const username = document.getElementById("username").value.trim();
+        const password = document.getElementById("password").value.trim();
+        try {
+          const res = await fetch("/api/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(data?.message || "Falha no login.");
+          }
+          token = data.token;
+          localStorage.setItem(tokenKey, token);
+          setLoggedIn(true);
+          showMessage("ok", "Login realizado. Painel pronto para operacao.");
+          await refreshStatus();
+        } catch (error) {
+          showMessage("error", error.message);
+        }
+      }
+
+      document.getElementById("loginBtn").addEventListener("click", onLogin);
+
+      document.querySelectorAll("button[data-action]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const action = button.dataset.action;
+          const id = button.dataset.id;
+          const durationInputId = button.dataset.durationId;
+          const duration = durationInputId ? Number(document.getElementById(durationInputId).value || 120) : 0;
+          try {
+            if (action === "start") {
+              const result = await apiCall(`/api/scenarios/${id}/start`, { durationSeconds: duration });
+              showMessage("ok", result.message || "Cenario iniciado.");
+            } else {
+              const result = await apiCall(`/api/scenarios/${id}/stop`, {});
+              showMessage("ok", result.message || "Cenario encerrado.");
+            }
+            await refreshStatus();
+          } catch (error) {
+            showMessage("error", error.message);
+          }
+        });
+      });
+
+      document.getElementById("stopAllBtn").addEventListener("click", async () => {
+        try {
+          const result = await apiCall("/api/scenarios/stop-all", {});
+          showMessage("ok", result.message || "Cenarios encerrados.");
+          await refreshStatus();
+        } catch (error) {
+          showMessage("error", error.message);
+        }
+      });
+
+      document.getElementById("cpuStartBtn").addEventListener("click", async () => {
+        const seconds = Number(document.getElementById("cpuSeconds").value || 180);
+        const intensity = Number(document.getElementById("cpuIntensity").value || 0.95);
+        const workers = Number(document.getElementById("cpuWorkers").value || 4);
+        try {
+          const result = await apiCall("/api/scenarios/infra-cpu/start", {
+            seconds,
+            intensity,
+            workers,
+          });
+          showMessage("ok", result.message || "CPU iniciada.");
+          await refreshStatus();
+        } catch (error) {
+          showMessage("error", error.message);
+        }
+      });
+
+      document.getElementById("cpuStopBtn").addEventListener("click", async () => {
+        try {
+          const result = await apiCall("/api/scenarios/infra-cpu/stop", {});
+          showMessage("ok", result.message || "CPU encerrada.");
+          await refreshStatus();
+        } catch (error) {
+          showMessage("error", error.message);
+        }
+      });
+
+      document.getElementById("loadStartBtn").addEventListener("click", async () => {
+        try {
+          const roles = Array.from(document.querySelectorAll(".load-role:checked")).map((item) => item.value);
+          if (!roles.length) {
+            throw new Error("Selecione ao menos um perfil para a carga.");
+          }
+          const payload = {
+            profile: document.getElementById("loadProfile").value,
+            sessions: Number(document.getElementById("loadSessions").value || 90),
+            durationSeconds: Number(document.getElementById("loadDuration").value || 300),
+            rampUpSeconds: Number(document.getElementById("loadRamp").value || 35),
+            requestPacingMs: Number(document.getElementById("loadPacing").value || 1300),
+            jitterMs: Number(document.getElementById("loadJitter").value || 500),
+            roles,
+          };
+          const result = await apiCall("/api/scenarios/load/start", payload);
+          showMessage("ok", result.message || "Carga iniciada.");
+          await refreshStatus();
+        } catch (error) {
+          showMessage("error", error.message);
+        }
+      });
+
+      document.getElementById("loadStopBtn").addEventListener("click", async () => {
+        try {
+          const result = await apiCall("/api/scenarios/load/stop", {});
+          showMessage("ok", result.message || "Carga encerrada.");
+          await refreshStatus();
+        } catch (error) {
+          showMessage("error", error.message);
+        }
+      });
+
+      setLoggedIn(Boolean(token));
+      if (token) {
+        refreshStatus();
+      }
+      setInterval(refreshStatus, 3000);
+    </script>
+  </body>
+</html>

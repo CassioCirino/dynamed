@@ -1,0 +1,15 @@
+{
+  "name": "hospital-control-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Painel operacional dedicado para acionar cenarios de simulacao sem depender do frontend principal.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.9",
+    "express": "^4.21.2"
+  }
+}
+
