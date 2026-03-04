@@ -1,33 +1,24 @@
-# Guia Rapido - EC2 com OneAgent
+# Guia Rapido - VM Linux com OneAgent no host
 
-Objetivo: subir esta simulacao em EC2 Linux ja instrumentada com Dynatrace OneAgent.
+Objetivo: subir esta simulacao em Linux com OneAgent instalado direto na VM (fora do Docker).
 
-## 1. Pre-requisitos na EC2
+## 1. Pre-requisitos na VM
 
 1. Linux com Docker e Docker Compose.
-2. Porta de saida liberada para o tenant Dynatrace.
-3. `ONEAGENT_INSTALLER_SCRIPT_URL` e `ONEAGENT_INSTALLER_DOWNLOAD_TOKEN` gerados no Dynatrace.
+2. OneAgent instalado no host da VM pelo instalador oficial do Dynatrace.
+3. Saida HTTPS liberada da VM para o tenant Dynatrace.
 
 ## 2. Configurar .env
 
-No arquivo `.env`, preencha:
+No arquivo `.env`, ajuste pelo menos:
 
-```env
-ONEAGENT_INSTALLER_SCRIPT_URL=<URL_DO_INSTALLER_NO_DYNATRACE>
-ONEAGENT_INSTALLER_DOWNLOAD_TOKEN=<TOKEN_DE_DOWNLOAD>
-ONEAGENT_INSTALLER_SKIP_CERT_CHECK=false
-ONEAGENT_CONTAINER_READ_ONLY=true
-ONEAGENT_HOST_ROOT_MOUNT_MODE=ro
-ONEAGENT_ENABLE_VOLUME_STORAGE=true
-```
+- `CONTROL_PANEL_PASSWORD`
+- `SIMULATION_CONTROL_KEY`
+- `DEFAULT_ADMIN_PASSWORD`
 
-Opcional (seguranca):
+Observacao: nao existe mais profile de OneAgent em container neste projeto.
 
-- troque `CONTROL_PANEL_PASSWORD`
-- troque `SIMULATION_CONTROL_KEY`
-- restrinja Security Group para acessar somente de IPs autorizados
-
-## 3. Subida com OneAgent
+## 3. Subida da stack
 
 ```bash
 chmod +x scripts/start-ec2-com-oneagent.sh
@@ -36,8 +27,10 @@ chmod +x scripts/start-ec2-com-oneagent.sh
 
 Esse comando sobe:
 
-1. app (frontend/backend/postgres/control-panel)
-2. container `dynatrace-oneagent` com perfil `dynatrace`
+1. `postgres`
+2. `backend`
+3. `frontend`
+4. `control-panel`
 
 ## 4. Validacoes
 
@@ -47,25 +40,27 @@ Esse comando sobe:
 docker compose ps
 ```
 
-2. Logs do agente:
+2. Verificar bibliotecas do OneAgent dentro dos processos:
 
 ```bash
-docker compose logs --tail=100 dynatrace-oneagent
+docker exec hospital-backend sh -lc "cat /proc/1/maps | grep -i oneagent | head"
+docker exec hospital-frontend sh -lc "cat /proc/1/maps | grep -i oneagent | head"
 ```
 
 3. No Dynatrace:
-- host da EC2 visivel
-- containers `hospital-*` visiveis
-- servicos do backend aparecendo em Distributed Traces e Services
+
+- host da VM visivel
+- servicos do backend visiveis
+- RUM do frontend visivel apos navegacao/carga de navegador
 
 ## 5. URLs da demo
 
-- Frontend principal: `http://IP_DA_EC2:5173`
-- Painel de cenarios: `http://IP_DA_EC2:5180`
-- API: `http://IP_DA_EC2:4000`
+- Frontend principal: `http://IP_DA_VM:5173`
+- Painel de controle: `http://IP_DA_VM:5180`
+- API: `http://IP_DA_VM:4000`
 
 ## 6. Observacoes importantes
 
-1. Este perfil do OneAgent foi preparado para host Linux.
-2. O painel de cenarios usa `/var/run/docker.sock`, portanto mantenha acesso de rede restrito.
-3. Para apresentacao, mantenha o painel em aba separada para ligar/desligar cenarios sem terminal.
+1. Para instrumentacao consistente, instale o OneAgent no host e depois reinicie os containers da app.
+2. O painel de controle usa `/var/run/docker.sock`; restrinja acesso de rede.
+3. Em apresentacao, use painel em aba separada para ligar/desligar cenarios sem terminal.

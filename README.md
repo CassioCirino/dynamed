@@ -198,67 +198,27 @@ chmod +x scripts/cenarios-dynatrace.sh
 ./scripts/cenarios-dynatrace.sh infra-cpu 180 0.95 4
 ```
 
-## Dynatrace OneAgent container monitoring
+## Dynatrace OneAgent no host da VM
 
-This repository includes an optional compose profile `dynatrace` with `dynatrace/oneagent`.
+Use o OneAgent instalado direto no sistema operacional da VM (fora do Docker).
+Este compose nao sobe mais OneAgent em container.
 
-### Configure OneAgent installer values
+Fluxo recomendado em Linux:
 
-Set these variables in `.env`:
-
-```env
-ONEAGENT_INSTALLER_SCRIPT_URL=<VALUE_FROM_DYNATRACE_UI>
-ONEAGENT_INSTALLER_DOWNLOAD_TOKEN=<VALUE_FROM_DYNATRACE_UI>
-ONEAGENT_INSTALLER_SKIP_CERT_CHECK=false
-ONEAGENT_CONTAINER_READ_ONLY=true
-ONEAGENT_HOST_ROOT_MOUNT_MODE=ro
-ONEAGENT_ENABLE_VOLUME_STORAGE=true
-```
-
-Local Docker Desktop fallback (Windows/macOS), if OneAgent does not initialize:
-
-```env
-ONEAGENT_CONTAINER_READ_ONLY=false
-ONEAGENT_HOST_ROOT_MOUNT_MODE=rw
-ONEAGENT_ENABLE_VOLUME_STORAGE=false
-```
-
-How to get these values in Dynatrace:
-
-- `Deploy Dynatrace` > `Start installation`
-- `Containerized environments` > `Docker`
-- copy installer script URL and download token
-
-### Start OneAgent profile
+1. Instale o OneAgent no host da VM pelo instalador oficial do Dynatrace.
+2. Suba a stack da aplicacao:
 
 ```bash
-docker compose --profile dynatrace up -d dynatrace-oneagent
+docker compose up -d --build
 ```
 
-Or start everything including OneAgent:
+3. Depois da instalacao do OneAgent, reinicie os containers monitorados:
 
 ```bash
-docker compose --profile dynatrace up -d --build
+docker compose restart backend frontend control-panel
 ```
 
-Validate OneAgent state:
-
-```bash
-docker compose ps dynatrace-oneagent
-docker compose --profile dynatrace logs --tail=120 dynatrace-oneagent
-```
-
-Or use helper script for EC2 Linux:
-
-```bash
-chmod +x scripts/start-ec2-com-oneagent.sh
-./scripts/start-ec2-com-oneagent.sh
-```
-
-Notes:
-
-- The OneAgent compose service is for Linux Docker hosts.
-- Core app stack runs without OneAgent profile.
+4. Valide no Dynatrace se servicos e RUM estao aparecendo.
 
 ## Operational endpoints
 

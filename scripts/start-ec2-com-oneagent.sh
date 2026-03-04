@@ -12,26 +12,6 @@ log_error() {
   echo "[ERRO] $*" >&2
 }
 
-read_env_file() {
-  local key="$1"
-  local env_file="$ROOT_DIR/.env"
-  if [[ ! -f "$env_file" ]]; then
-    return 1
-  fi
-  grep -E "^${key}=" "$env_file" | tail -n 1 | cut -d "=" -f2-
-}
-
-require_env() {
-  local key="$1"
-  local value
-  value="$(read_env_file "$key" || true)"
-  if [[ -z "$value" ]]; then
-    log_error "Variavel obrigatoria ausente no .env: $key"
-    return 1
-  fi
-  return 0
-}
-
 main() {
   if [[ ! -f ".env" ]]; then
     log_error "Arquivo .env nao encontrado."
@@ -44,20 +24,16 @@ main() {
     exit 1
   }
 
-  require_env "ONEAGENT_INSTALLER_SCRIPT_URL"
-  require_env "ONEAGENT_INSTALLER_DOWNLOAD_TOKEN"
-
-  log_info "Subindo stack com perfil dynatrace..."
-  docker compose --profile dynatrace up -d --build
+  log_info "Subindo stack da aplicacao (sem OneAgent em container)..."
+  docker compose up -d --build
 
   log_info "Status dos containers:"
   docker compose ps
 
-  log_info "Ultimos logs do OneAgent:"
-  docker compose logs --tail=80 dynatrace-oneagent || true
+  log_info "Se o OneAgent foi instalado no host, reiniciando app para garantir instrumentacao..."
+  docker compose restart backend frontend control-panel || true
 
-  log_info "Concluido. Abra o Dynatrace e confirme entidades do host/container."
+  log_info "Concluido. Confirme no Dynatrace os servicos e sessoes do frontend."
 }
 
 main "$@"
-
