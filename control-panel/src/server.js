@@ -16,22 +16,39 @@ const BACKEND_CONTAINER = String(process.env.APP_BACKEND_CONTAINER || "hospital-
 const POSTGRES_CONTAINER = String(process.env.APP_POSTGRES_CONTAINER || "hospital-postgres").trim();
 const RUM_BROWSER_CONTAINER = String(process.env.APP_RUM_BROWSER_CONTAINER || "hospital-rum-browser-load").trim();
 
-const BACKEND_INTERNAL_URL = String(process.env.BACKEND_INTERNAL_URL || "http://backend:4000").trim().replace(/\/$/, "");
+const BACKEND_INTERNAL_URL = String(process.env.BACKEND_INTERNAL_URL || "http://hospital-backend:4000")
+  .trim()
+  .replace(/\/$/, "");
+const BACKEND_INTERNAL_FALLBACK_URLS = String(
+  process.env.BACKEND_INTERNAL_FALLBACK_URLS || "http://backend:4000,http://hospital-backend:4000",
+)
+  .split(",")
+  .map((item) => item.trim().replace(/\/$/, ""))
+  .filter(Boolean);
 const DEFAULT_ADMIN_EMAIL = String(process.env.DEFAULT_ADMIN_EMAIL || "admin@hospital.local").trim();
 const DEFAULT_ADMIN_PASSWORD = String(process.env.DEFAULT_ADMIN_PASSWORD || "dyantrace").trim();
 const SIMULATION_CONTROL_KEY = String(process.env.SIMULATION_CONTROL_KEY || "").trim();
+const LOAD_STATE_CACHE_MS = Math.max(1000, Number(process.env.CONTROL_PANEL_LOAD_STATE_CACHE_MS || 15000));
 
 const docker = new Docker({ socketPath: "/var/run/docker.sock" });
 const scenarioState = new Map();
 const backendAuthCache = {
   token: "",
   exp: 0,
+  baseUrl: "",
+};
+const loadStateCache = {
+  atMs: 0,
+  load: null,
+  error: null,
 };
 
 const LOAD_SCENARIO_ID = "synthetic-load";
 const RUM_SCENARIO_ID = "rum-front";
 const CHAOS_ERROR_RATE_SCENARIO_ID = "chaos-error-rate";
 const CHAOS_LATENCY_SCENARIO_ID = "chaos-latency";
+const PRESET_API_DEGRADADA_SCENARIO_ID = "preset-api-degradada";
+const PRESET_DB_CARGA_SCENARIO_ID = "preset-db-carga";
 const ALLOWED_LOAD_PROFILES = new Set(["light", "moderate", "heavy", "extreme", "custom"]);
 const ALLOWED_LOAD_ROLES = new Set(["patient", "doctor", "receptionist", "admin"]);
 const DEFAULT_LOAD_ROLES = ["patient", "doctor", "receptionist"];
@@ -119,6 +136,19 @@ function readToken(req) {
     return "";
   }
   return auth.slice(7).trim();
+}
+
+function getBackendBaseUrls(preferred = "") {
+  const raw = [preferred, backendAuthCache.baseUrl, BACKEND_INTERNAL_URL, ...BACKEND_INTERNAL_FALLBACK_URLS];
+  const unique = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    const value = String(entry || "").trim().replace(/\/$/, "");
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    unique.push(value);
+  }
+  return unique;
 }
 
 function requireAuth(req, res, next) {
@@ -477,27 +507,46 @@ async function stopOutageScenario(id) {
 }
 
 async function loginBackendAdmin() {
-  const response = await fetch(`${BACKEND_INTERNAL_URL}/api/auth/login`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      email: DEFAULT_ADMIN_EMAIL,
-      password: DEFAULT_ADMIN_PASSWORD,
-    }),
-  });
+  const errors = [];
+  const baseUrls = getBackendBaseUrls();
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Falha ao autenticar no backend (${response.status}): ${text}`);
+  for (const baseUrl of baseUrls) {
+    let response;
+    try {
+      response = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: DEFAULT_ADMIN_EMAIL,
+          password: DEFAULT_ADMIN_PASSWORD,
+        }),
+      });
+    } catch (error) {
+      errors.push(`${baseUrl}: ${error.message}`);
+      continue;
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      errors.push(`${baseUrl}: auth ${response.status} ${text}`);
+      continue;
+    }
+
+    const data = await response.json();
+    if (!data?.token) {
+      errors.push(`${baseUrl}: resposta sem token`);
+      continue;
+    }
+
+    return {
+      token: data.token,
+      baseUrl,
+    };
   }
 
-  const data = await response.json();
-  if (!data?.token) {
-    throw new Error("Resposta de login do backend sem token.");
-  }
-  return data.token;
+  throw new Error(`Backend indisponivel: ${errors.join(" | ") || "sem resposta"}`);
 }
 
 async function getBackendAdminToken(forceRefresh = false) {
@@ -506,11 +555,12 @@ async function getBackendAdminToken(forceRefresh = false) {
     return backendAuthCache.token;
   }
 
-  const token = await loginBackendAdmin();
-  const exp = parseJwtExp(token);
-  backendAuthCache.token = token;
+  const login = await loginBackendAdmin();
+  const exp = parseJwtExp(login.token);
+  backendAuthCache.token = login.token;
   backendAuthCache.exp = exp || now + 120;
-  return token;
+  backendAuthCache.baseUrl = login.baseUrl || "";
+  return login.token;
 }
 
 async function backendRequest(pathname, options = {}) {
@@ -536,16 +586,28 @@ async function backendRequest(pathname, options = {}) {
     headers["x-simulacao-chave"] = SIMULATION_CONTROL_KEY;
   }
 
-  let response;
-  try {
-    response = await fetch(`${BACKEND_INTERNAL_URL}${pathname}`, {
-      method,
-      headers,
-      body: payload !== undefined ? JSON.stringify(payload) : undefined,
-    });
-  } catch (error) {
-    throw new Error(`Backend indisponivel: ${error.message}`);
+  const errors = [];
+  const baseUrls = getBackendBaseUrls();
+
+  let response = null;
+  let responseBaseUrl = "";
+  for (const baseUrl of baseUrls) {
+    try {
+      response = await fetch(`${baseUrl}${pathname}`, {
+        method,
+        headers,
+        body: payload !== undefined ? JSON.stringify(payload) : undefined,
+      });
+      responseBaseUrl = baseUrl;
+      break;
+    } catch (error) {
+      errors.push(`${baseUrl}: ${error.message}`);
+    }
   }
+  if (!response) {
+    throw new Error(`Backend indisponivel: ${errors.join(" | ") || "fetch failed"}`);
+  }
+  backendAuthCache.baseUrl = responseBaseUrl || backendAuthCache.baseUrl;
 
   if (response.status === 401 && retryAuth) {
     backendAuthCache.token = "";
@@ -569,7 +631,7 @@ async function backendRequest(pathname, options = {}) {
   }
 
   if (!response.ok) {
-    throw new Error(parsedBody?.message || `Falha no backend (${response.status}).`);
+    throw new Error(parsedBody?.message || `Falha no backend (${response.status}) via ${responseBaseUrl}.`);
   }
 
   return parsedBody;
@@ -790,6 +852,9 @@ async function startLoadFromControlPanel(rawPayload) {
     requiresControlKey: true,
   });
   syncLoadScenario(data?.load || null);
+  loadStateCache.atMs = Date.now();
+  loadStateCache.load = data?.load || null;
+  loadStateCache.error = null;
   return data;
 }
 
@@ -800,6 +865,9 @@ async function stopLoadFromControlPanel(reason = "manual_stop_via_control_panel"
     requiresControlKey: true,
   });
   syncLoadScenario(data?.load || null);
+  loadStateCache.atMs = Date.now();
+  loadStateCache.load = data?.load || null;
+  loadStateCache.error = null;
   return data;
 }
 
@@ -932,27 +1000,143 @@ async function startApiLatencyChaos({ baseMs, jitterMs, durationSeconds }) {
 }
 
 async function resetApiChaosScenarios() {
-  await backendRequest("/api/operations/chaos/error-rate", {
-    method: "POST",
-    requiresControlKey: true,
-    payload: {
-      percent: 0,
-      durationSeconds: 1,
-    },
-  });
+  const errors = [];
+  try {
+    await backendRequest("/api/operations/chaos/error-rate", {
+      method: "POST",
+      requiresControlKey: true,
+      payload: {
+        percent: 0,
+        durationSeconds: 1,
+      },
+    });
+  } catch (error) {
+    errors.push(`error-rate: ${error.message}`);
+  }
 
-  await backendRequest("/api/operations/chaos/latency", {
-    method: "POST",
-    requiresControlKey: true,
-    payload: {
-      baseMs: 0,
-      jitterMs: 0,
-      durationSeconds: 1,
-    },
-  });
+  try {
+    await backendRequest("/api/operations/chaos/latency", {
+      method: "POST",
+      requiresControlKey: true,
+      payload: {
+        baseMs: 0,
+        jitterMs: 0,
+        durationSeconds: 1,
+      },
+    });
+  } catch (error) {
+    errors.push(`latency: ${error.message}`);
+  }
 
   scenarioState.delete(CHAOS_ERROR_RATE_SCENARIO_ID);
   scenarioState.delete(CHAOS_LATENCY_SCENARIO_ID);
+  if (errors.length) {
+    throw new Error(`Reset parcial do chaos API: ${errors.join(" | ")}`);
+  }
+}
+
+async function stopAllScenarios() {
+  await stopOutageScenario("dev-front");
+  await stopOutageScenario("dev-api");
+  await stopOutageScenario("db");
+  try {
+    await stopCpuChaos();
+  } catch (_error) {
+    // no-op
+  }
+  try {
+    await stopLoadFromControlPanel();
+  } catch (_error) {
+    // no-op
+  }
+  try {
+    await stopRumBrowserScenario();
+  } catch (_error) {
+    // no-op
+  }
+  try {
+    await resetApiChaosScenarios();
+  } catch (_error) {
+    // no-op
+  }
+  scenarioState.delete(PRESET_API_DEGRADADA_SCENARIO_ID);
+  scenarioState.delete(PRESET_DB_CARGA_SCENARIO_ID);
+}
+
+async function startPresetApiDegradada() {
+  const durationSeconds = 420;
+  await startApiErrorRateChaos({ percent: 35, durationSeconds });
+  await startApiLatencyChaos({ baseMs: 1800, jitterMs: 1200, durationSeconds });
+  await triggerCpuChaos({ seconds: 300, intensity: 0.92, workers: 4 });
+
+  setTimedScenarioState({
+    id: PRESET_API_DEGRADADA_SCENARIO_ID,
+    type: "preset_combo",
+    label: "Preset - API degradada",
+    durationSeconds,
+    details: {
+      preset: "api-degradada",
+      errorRatePercent: 35,
+      latencyBaseMs: 1800,
+      latencyJitterMs: 1200,
+      cpuSeconds: 300,
+      cpuIntensity: 0.92,
+      cpuWorkers: 4,
+    },
+    note: "Erro intermitente + latencia + pressao de CPU para gerar degradacao visivel.",
+  });
+}
+
+async function startPresetDbCarga() {
+  const durationSeconds = 300;
+  await startLoadFromControlPanel({
+    profile: "heavy",
+    sessions: 150,
+    durationSeconds,
+    rampUpSeconds: 35,
+    requestPacingMs: 1000,
+    jitterMs: 450,
+    roles: ["patient", "doctor", "receptionist"],
+  });
+  await startOutageScenario({
+    id: "db",
+    label: "Banco - PostgreSQL indisponivel",
+    containerName: POSTGRES_CONTAINER,
+    durationSeconds,
+  });
+
+  setTimedScenarioState({
+    id: PRESET_DB_CARGA_SCENARIO_ID,
+    type: "preset_combo",
+    label: "Preset - Banco indisponivel com carga",
+    durationSeconds,
+    details: {
+      preset: "db-carga",
+      loadProfile: "heavy",
+      sessions: 150,
+      dbOutageSeconds: durationSeconds,
+    },
+    note: "Carga ativa e banco indisponivel para forcar erro/latencia no backend e frontend.",
+  });
+}
+
+async function startPresetScenario(presetId) {
+  const preset = String(presetId || "").trim();
+  if (preset === "api-degradada") {
+    await startPresetApiDegradada();
+    return {
+      preset,
+      message: "Preset API degradada iniciado.",
+    };
+  }
+  if (preset === "db-carga") {
+    await startPresetDbCarga();
+    return {
+      preset,
+      message: "Preset banco indisponivel com carga iniciado.",
+    };
+  }
+  throw new Error("Preset invalido.");
 }
 
 app.get("/api/health", (_req, res) => {
@@ -984,16 +1168,22 @@ app.get("/api/status", requireAuth, async (_req, res, next) => {
   try {
     const containers = await getContainerStatusMap();
     syncRumScenario(containers);
-    let load = null;
-    let loadError = null;
+    const nowMs = Date.now();
 
-    try {
-      const state = await backendRequest("/api/operations/state", { method: "GET" });
-      load = state?.load || null;
-      syncLoadScenario(load);
-    } catch (error) {
-      loadError = error.message;
-      syncLoadScenario(null);
+    if (nowMs - loadStateCache.atMs >= LOAD_STATE_CACHE_MS) {
+      try {
+        const state = await backendRequest("/api/operations/state", { method: "GET" });
+        loadStateCache.load = state?.load || null;
+        loadStateCache.error = null;
+        loadStateCache.atMs = nowMs;
+        syncLoadScenario(loadStateCache.load);
+      } catch (error) {
+        loadStateCache.error = error.message;
+        loadStateCache.atMs = nowMs;
+        if (!loadStateCache.load) {
+          syncLoadScenario(null);
+        }
+      }
     }
 
     return res.json({
@@ -1004,8 +1194,8 @@ app.get("/api/status", requireAuth, async (_req, res, next) => {
         postgres: containers[POSTGRES_CONTAINER] || null,
         rumBrowser: containers[RUM_BROWSER_CONTAINER] || null,
       },
-      load,
-      loadError,
+      load: loadStateCache.load,
+      loadError: loadStateCache.error,
       scenarios: scenarioSnapshot(),
     });
   } catch (error) {
@@ -1157,6 +1347,31 @@ app.post("/api/scenarios/chaos/reset", requireAuth, async (_req, res, next) => {
   }
 });
 
+app.post("/api/scenarios/presets/start", requireAuth, async (req, res, next) => {
+  try {
+    const result = await startPresetScenario(req.body?.preset);
+    return res.json({
+      message: result.message,
+      result,
+      scenarios: scenarioSnapshot(),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/scenarios/presets/reset", requireAuth, async (_req, res, next) => {
+  try {
+    await stopAllScenarios();
+    return res.json({
+      message: "Reset geral executado (chaos, indisponibilidade e cargas).",
+      scenarios: scenarioSnapshot(),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.post("/api/scenarios/load/start", requireAuth, async (req, res, next) => {
   try {
     const data = await startLoadFromControlPanel(req.body || {});
@@ -1210,29 +1425,7 @@ app.post("/api/scenarios/rum-front/stop", requireAuth, async (_req, res, next) =
 
 app.post("/api/scenarios/stop-all", requireAuth, async (_req, res, next) => {
   try {
-    await stopOutageScenario("dev-front");
-    await stopOutageScenario("dev-api");
-    await stopOutageScenario("db");
-    try {
-      await stopCpuChaos();
-    } catch (_error) {
-      // no-op
-    }
-    try {
-      await stopLoadFromControlPanel();
-    } catch (_error) {
-      // no-op
-    }
-    try {
-      await stopRumBrowserScenario();
-    } catch (_error) {
-      // no-op
-    }
-    try {
-      await resetApiChaosScenarios();
-    } catch (_error) {
-      // no-op
-    }
+    await stopAllScenarios();
     return res.json({
       message: "Todos os cenarios foram encerrados.",
       note: "Parada geral executada no painel de controle.",

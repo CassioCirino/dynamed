@@ -330,10 +330,28 @@
             </article>
 
             <article class="panel">
-              <h3>Reset chaos API</h3>
-              <p class="tiny">Remove latencia/erro intermitente e volta API ao comportamento normal.</p>
+              <h3>Combo - API degradada</h3>
+              <p class="tiny">Inicia junto: erro intermitente + latencia alta + pressao de CPU.</p>
               <div class="btn-row">
-                <button class="btn-neutral" data-preset="api-chaos-reset">Resetar</button>
+                <button class="btn-danger" data-preset="combo-api-degradada">Iniciar combo</button>
+              </div>
+              <p class="tiny" id="info-preset-api-degradada"></p>
+            </article>
+
+            <article class="panel">
+              <h3>Combo - Banco fora com carga</h3>
+              <p class="tiny">Ativa carga pesada e derruba o PostgreSQL ao mesmo tempo por 5 minutos.</p>
+              <div class="btn-row">
+                <button class="btn-danger" data-preset="combo-db-carga">Iniciar combo</button>
+              </div>
+              <p class="tiny" id="info-preset-db-carga"></p>
+            </article>
+
+            <article class="panel">
+              <h3>Reset geral</h3>
+              <p class="tiny">Reseta chaos, indisponibilidades e cargas em um clique.</p>
+              <div class="btn-row">
+                <button class="btn-neutral" data-preset="preset-reset-total">Resetar tudo</button>
               </div>
             </article>
           </div>
@@ -558,6 +576,8 @@
           setScenarioInfo("synthetic-load", data.scenarios?.["synthetic-load"]);
           setScenarioInfo("chaos-error-rate", data.scenarios?.["chaos-error-rate"]);
           setScenarioInfo("chaos-latency", data.scenarios?.["chaos-latency"]);
+          setScenarioInfo("preset-api-degradada", data.scenarios?.["preset-api-degradada"]);
+          setScenarioInfo("preset-db-carga", data.scenarios?.["preset-db-carga"]);
           setRumScenarioInfo(data.scenarios?.["rum-front"]);
           renderLoadState(data.load, data.loadError);
           refreshInfo.textContent = `Ultima atualizacao: ${new Date().toLocaleTimeString("pt-BR")}`;
@@ -644,8 +664,18 @@
             durationSeconds: 300,
           });
         }
-        if (presetId === "api-chaos-reset") {
-          return apiCall("/api/scenarios/chaos/reset", {});
+        if (presetId === "combo-api-degradada") {
+          return apiCall("/api/scenarios/presets/start", {
+            preset: "api-degradada",
+          });
+        }
+        if (presetId === "combo-db-carga") {
+          return apiCall("/api/scenarios/presets/start", {
+            preset: "db-carga",
+          });
+        }
+        if (presetId === "preset-reset-total" || presetId === "api-chaos-reset") {
+          return apiCall("/api/scenarios/presets/reset", {});
         }
         throw new Error("Preset desconhecido.");
       }
@@ -788,7 +818,7 @@
       if (token) {
         refreshStatus();
       }
-      setInterval(refreshStatus, 3000);
+      setInterval(refreshStatus, 10000);
     </script>
   </body>
 </html>
