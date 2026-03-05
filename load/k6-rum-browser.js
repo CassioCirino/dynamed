@@ -449,6 +449,9 @@ export default async function () {
   const preferredRole = pickWeightedRole(RUM_ROLE_WEIGHTS);
   const shouldStayAnonymous = Math.random() < RUM_ANONYMOUS_RATE;
   const anonymousAllowed = shouldStayAnonymous || RUM_ANONYMOUS_RATE > 0;
+  console.error(
+    `[rum-iter-start] role=${preferredRole} anonymousCandidate=${shouldStayAnonymous} anonymousAllowed=${anonymousAllowed}`,
+  );
 
   let context = null;
   let page = null;
@@ -504,7 +507,7 @@ export default async function () {
         identifyFailure.add(1);
       }
 
-      console.log(
+      console.error(
         `[rum-login] role=${preferredRole} loggedIn=${loggedIn} identify=${identifyOk} anonymousAllowed=${anonymousAllowed}`,
       );
 
@@ -533,7 +536,7 @@ export default async function () {
       }
 
       if (actionCount % 5 === 0) {
-        console.log(
+        console.error(
           `[rum-step] role=${preferredRole} loggedIn=${loggedIn} identify=${identifyOk} actions=${actionCount}/${targetActions}`,
         );
       }
@@ -552,7 +555,7 @@ export default async function () {
     const totalSeconds = (Date.now() - startedAt) / 1000;
     durationPerIteration.add(totalSeconds);
 
-    console.log(
+    console.error(
       `[rum-iter] role=${preferredRole} loggedIn=${loggedIn} identify=${identifyOk} actions=${actionCount} durationSec=${Math.round(totalSeconds)}`,
     );
   } catch (error) {
