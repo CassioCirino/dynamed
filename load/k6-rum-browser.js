@@ -510,21 +510,61 @@ function safeJson(response) {
   }
 }
 
-function loginViaBackendApi(role) {
-  const usersRes = http.get(`${FRONTEND_URL}/api/auth/demo-users?role=${encodeURIComponent(role)}&limit=24`, {
-    timeout: "12s",
-  });
+function fetchDemoUsersByRole(role) {
+  const roleParam = String(role || "").trim();
+  const query = roleParam ? `role=${encodeURIComponent(roleParam)}&` : "";
+  const usersRes = http.get(`${FRONTEND_URL}/api/auth/demo-users?${query}limit=80`, { timeout: "12s" });
   if (!usersRes || usersRes.status !== 200) {
-    return { ok: false, reason: `demo-users-status-${usersRes?.status || "no-response"}` };
+    return {
+      ok: false,
+      users: [],
+      reason: `demo-users-status-${usersRes?.status || "no-response"}-role-${roleParam || "all"}`,
+    };
   }
 
   const usersBody = safeJson(usersRes);
   const users = Array.isArray(usersBody?.users) ? usersBody.users : [];
-  if (!users.length) {
-    return { ok: false, reason: "demo-users-empty" };
+  return {
+    ok: true,
+    users,
+    reason: users.length ? "" : `demo-users-empty-role-${roleParam || "all"}`,
+  };
+}
+
+function pickDemoUser(preferredRole) {
+  const roleCandidates = [preferredRole, "patient", "doctor", "receptionist", "admin", ""]
+    .map((item) => String(item || "").trim())
+    .filter((item, index, arr) => arr.indexOf(item) === index);
+
+  const reasons = [];
+  for (const role of roleCandidates) {
+    const result = fetchDemoUsersByRole(role);
+    if (!result.ok) {
+      reasons.push(result.reason);
+      continue;
+    }
+    const users = result.users;
+    if (!users.length) {
+      reasons.push(result.reason || `demo-users-empty-role-${role || "all"}`);
+      continue;
+    }
+    const picked = users[Math.floor(Math.random() * users.length)];
+    if (picked?.id) {
+      return { ok: true, user: picked, sourceRole: role || "all" };
+    }
+    reasons.push(`demo-user-without-id-role-${role || "all"}`);
   }
 
-  const picked = users[Math.floor(Math.random() * users.length)];
+  return { ok: false, reason: reasons.join("|") || "no-users-available" };
+}
+
+function loginViaBackendApi(role) {
+  const pickedResult = pickDemoUser(role);
+  if (!pickedResult.ok) {
+    return { ok: false, reason: pickedResult.reason || "demo-users-empty" };
+  }
+
+  const picked = pickedResult.user;
   if (!picked?.id) {
     return { ok: false, reason: "demo-user-without-id" };
   }
@@ -551,6 +591,7 @@ function loginViaBackendApi(role) {
       user: loginBody.user,
     },
     userTag: buildUserTagFromPayload(loginBody.user),
+    sourceRole: pickedResult.sourceRole,
   };
 }
 
@@ -576,7 +617,7 @@ async function robustDemoLogin(page, preferredRole) {
   console.error(`[rum-phase] role=${preferredRole} step=backend-api-login-start`);
   const apiLogin = loginViaBackendApi(preferredRole || "patient");
   if (apiLogin.ok) {
-    console.error(`[rum-phase] role=${preferredRole} step=backend-api-login-success`);
+    console.error(`[rum-phase] role=${preferredRole} step=backend-api-login-success sourceRole=${apiLogin.sourceRole || "-"}`);
     const applied = await applyAuthIntoBrowserStorage(page, apiLogin.auth);
     if (applied) {
       console.error(`[rum-phase] role=${preferredRole} step=localstorage-applied`);
