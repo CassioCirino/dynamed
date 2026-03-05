@@ -1083,12 +1083,21 @@ function resolvePresetDurationSeconds(rawOptions = {}, fallbackSeconds = 300) {
   return Math.round(fallbackSeconds);
 }
 
-async function startPresetApiDegradada(durationSeconds = 300) {
-  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
-  const cpuSeconds = Math.max(60, Math.min(600, safeDuration));
-  await startApiErrorRateChaos({ percent: 35, durationSeconds: safeDuration });
-  await startApiLatencyChaos({ baseMs: 1800, jitterMs: 1200, durationSeconds: safeDuration });
-  await triggerCpuChaos({ seconds: cpuSeconds, intensity: 0.92, workers: 4 });
+async function startPresetApiDegradada(durationSeconds = 300, anomalyMode = false) {
+  let safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+  if (anomalyMode) {
+    safeDuration = Math.max(900, safeDuration);
+  }
+  const cpuSeconds = Math.max(60, Math.min(900, safeDuration));
+  const errorRatePercent = anomalyMode ? 50 : 35;
+  const latencyBaseMs = anomalyMode ? 2600 : 1800;
+  const latencyJitterMs = anomalyMode ? 1400 : 1200;
+  const cpuIntensity = anomalyMode ? 0.95 : 0.92;
+  const cpuWorkers = anomalyMode ? 6 : 4;
+
+  await startApiErrorRateChaos({ percent: errorRatePercent, durationSeconds: safeDuration });
+  await startApiLatencyChaos({ baseMs: latencyBaseMs, jitterMs: latencyJitterMs, durationSeconds: safeDuration });
+  await triggerCpuChaos({ seconds: cpuSeconds, intensity: cpuIntensity, workers: cpuWorkers });
 
   setTimedScenarioState({
     id: PRESET_API_DEGRADADA_SCENARIO_ID,
@@ -1097,26 +1106,35 @@ async function startPresetApiDegradada(durationSeconds = 300) {
     durationSeconds: safeDuration,
     details: {
       preset: "api-degradada",
-      errorRatePercent: 35,
-      latencyBaseMs: 1800,
-      latencyJitterMs: 1200,
+      anomalyMode,
+      errorRatePercent,
+      latencyBaseMs,
+      latencyJitterMs,
       cpuSeconds,
-      cpuIntensity: 0.92,
-      cpuWorkers: 4,
+      cpuIntensity,
+      cpuWorkers,
     },
     note: "Erro intermitente + latencia + pressao de CPU para gerar degradacao visivel.",
   });
 }
 
-async function startPresetDbCarga(durationSeconds = 300) {
-  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+async function startPresetDbCarga(durationSeconds = 300, anomalyMode = false) {
+  let safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+  if (anomalyMode) {
+    safeDuration = Math.max(900, safeDuration);
+  }
+  const profile = anomalyMode ? "extreme" : "heavy";
+  const sessions = anomalyMode ? 220 : 150;
+  const requestPacingMs = anomalyMode ? 800 : 1000;
+  const jitterMs = anomalyMode ? 300 : 450;
+
   await startLoadFromControlPanel({
-    profile: "heavy",
-    sessions: 150,
+    profile,
+    sessions,
     durationSeconds: safeDuration,
     rampUpSeconds: 35,
-    requestPacingMs: 1000,
-    jitterMs: 450,
+    requestPacingMs,
+    jitterMs,
     roles: ["patient", "doctor", "receptionist"],
   });
   await startOutageScenario({
@@ -1133,25 +1151,34 @@ async function startPresetDbCarga(durationSeconds = 300) {
     durationSeconds: safeDuration,
     details: {
       preset: "db-carga",
-      loadProfile: "heavy",
-      sessions: 150,
+      anomalyMode,
+      loadProfile: profile,
+      sessions,
       dbOutageSeconds: safeDuration,
     },
     note: "Carga ativa e banco indisponivel para forcar erro/latencia no backend e frontend.",
   });
 }
 
-async function startPresetRootDb(durationSeconds = 300) {
-  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
+  let safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+  if (anomalyMode) {
+    safeDuration = Math.max(900, safeDuration);
+  }
+  const profile = anomalyMode ? "heavy" : "moderate";
+  const sessions = anomalyMode ? 180 : 110;
+  const requestPacingMs = anomalyMode ? 900 : 1100;
+  const jitterMs = anomalyMode ? 300 : 400;
+
   await stopAllScenarios();
 
   await startLoadFromControlPanel({
-    profile: "moderate",
-    sessions: 110,
+    profile,
+    sessions,
     durationSeconds: safeDuration,
     rampUpSeconds: 30,
-    requestPacingMs: 1100,
-    jitterMs: 400,
+    requestPacingMs,
+    jitterMs,
     roles: ["patient", "doctor", "receptionist"],
   });
 
@@ -1169,30 +1196,42 @@ async function startPresetRootDb(durationSeconds = 300) {
     durationSeconds: safeDuration,
     details: {
       target: "db",
-      loadProfile: "moderate",
-      sessions: 110,
+      anomalyMode,
+      loadProfile: profile,
+      sessions,
       dbOutageSeconds: safeDuration,
     },
     note: "Banco indisponivel com carga ativa para forcar erro com causa raiz no PostgreSQL.",
   });
 }
 
-async function startPresetRootBackend(durationSeconds = 300) {
-  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+async function startPresetRootBackend(durationSeconds = 300, anomalyMode = false) {
+  let safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+  if (anomalyMode) {
+    safeDuration = Math.max(900, safeDuration);
+  }
+  const profile = anomalyMode ? "extreme" : "heavy";
+  const sessions = anomalyMode ? 240 : 140;
+  const requestPacingMs = anomalyMode ? 750 : 1000;
+  const jitterMs = anomalyMode ? 250 : 450;
+  const errorRatePercent = anomalyMode ? 75 : 55;
+  const latencyBaseMs = anomalyMode ? 3200 : 2200;
+  const latencyJitterMs = anomalyMode ? 1200 : 900;
+
   await stopAllScenarios();
 
   await startLoadFromControlPanel({
-    profile: "heavy",
-    sessions: 140,
+    profile,
+    sessions,
     durationSeconds: safeDuration,
     rampUpSeconds: 35,
-    requestPacingMs: 1000,
-    jitterMs: 450,
+    requestPacingMs,
+    jitterMs,
     roles: ["patient", "doctor", "receptionist", "admin"],
   });
 
-  await startApiErrorRateChaos({ percent: 55, durationSeconds: safeDuration });
-  await startApiLatencyChaos({ baseMs: 2200, jitterMs: 900, durationSeconds: safeDuration });
+  await startApiErrorRateChaos({ percent: errorRatePercent, durationSeconds: safeDuration });
+  await startApiLatencyChaos({ baseMs: latencyBaseMs, jitterMs: latencyJitterMs, durationSeconds: safeDuration });
 
   setTimedScenarioState({
     id: PRESET_ROOT_BACKEND_SCENARIO_ID,
@@ -1201,18 +1240,22 @@ async function startPresetRootBackend(durationSeconds = 300) {
     durationSeconds: safeDuration,
     details: {
       target: "backend",
-      loadProfile: "heavy",
-      sessions: 140,
-      errorRatePercent: 55,
-      latencyBaseMs: 2200,
-      latencyJitterMs: 900,
+      anomalyMode,
+      loadProfile: profile,
+      sessions,
+      errorRatePercent,
+      latencyBaseMs,
+      latencyJitterMs,
     },
     note: "Erro e latencia na API com banco ativo para destacar causa raiz no backend.",
   });
 }
 
-async function startPresetRootFrontend(durationSeconds = 300) {
-  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+async function startPresetRootFrontend(durationSeconds = 300, anomalyMode = false) {
+  let safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+  if (anomalyMode) {
+    safeDuration = Math.max(900, safeDuration);
+  }
   await stopAllScenarios();
 
   await startOutageScenario({
@@ -1229,6 +1272,7 @@ async function startPresetRootFrontend(durationSeconds = 300) {
     durationSeconds: safeDuration,
     details: {
       target: "frontend",
+      anomalyMode,
       frontendOutageSeconds: safeDuration,
     },
     note: "Indisponibilidade direta do frontend para causa raiz no servico web.",
@@ -1237,10 +1281,11 @@ async function startPresetRootFrontend(durationSeconds = 300) {
 
 async function startPresetScenario(presetId, options = {}) {
   const durationSeconds = resolvePresetDurationSeconds(options, 300);
+  const anomalyMode = String(options?.anomalyMode ?? "true").trim().toLowerCase() !== "false";
   const durationMinutes = Math.round(durationSeconds / 60);
   const preset = String(presetId || "").trim();
   if (preset === "api-degradada") {
-    await startPresetApiDegradada(durationSeconds);
+    await startPresetApiDegradada(durationSeconds, anomalyMode);
     return {
       preset,
       durationMinutes,
@@ -1248,7 +1293,7 @@ async function startPresetScenario(presetId, options = {}) {
     };
   }
   if (preset === "db-carga") {
-    await startPresetDbCarga(durationSeconds);
+    await startPresetDbCarga(durationSeconds, anomalyMode);
     return {
       preset,
       durationMinutes,
@@ -1256,7 +1301,7 @@ async function startPresetScenario(presetId, options = {}) {
     };
   }
   if (preset === "root-db") {
-    await startPresetRootDb(durationSeconds);
+    await startPresetRootDb(durationSeconds, anomalyMode);
     return {
       preset,
       durationMinutes,
@@ -1264,7 +1309,7 @@ async function startPresetScenario(presetId, options = {}) {
     };
   }
   if (preset === "root-backend") {
-    await startPresetRootBackend(durationSeconds);
+    await startPresetRootBackend(durationSeconds, anomalyMode);
     return {
       preset,
       durationMinutes,
@@ -1272,7 +1317,7 @@ async function startPresetScenario(presetId, options = {}) {
     };
   }
   if (preset === "root-frontend") {
-    await startPresetRootFrontend(durationSeconds);
+    await startPresetRootFrontend(durationSeconds, anomalyMode);
     return {
       preset,
       durationMinutes,
