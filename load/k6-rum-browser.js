@@ -176,7 +176,30 @@ async function clickRandomMenuLink(page) {
     return false;
   }
   const target = randomInt(0, menuCount - 1);
-  await page.locator(".menu-link").nth(target).click({ timeout: 12000 }).catch(() => {});
+  const clicked = await page
+    .evaluate(
+      ({ selector, index }) => {
+        const all = Array.from(document.querySelectorAll(selector));
+        const element = all[index];
+        if (!element) {
+          return false;
+        }
+        element.scrollIntoView({ block: "center" });
+        element.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          }),
+        );
+        return true;
+      },
+      { selector: ".menu-link", index: target },
+    )
+    .catch(() => false);
+  if (!clicked) {
+    return false;
+  }
   await page.waitForTimeout(500 + Math.random() * 1200);
   return true;
 }
@@ -207,23 +230,20 @@ async function selectDifferentOptionByIndex(page, selector, index = 0) {
     return false;
   }
 
-  const target = page.locator(selector).nth(index);
-  await target.selectOption(value).catch(async () => {
-    await page
-      .evaluate(
-        ({ sel, idx, val }) => {
-          const all = Array.from(document.querySelectorAll(sel));
-          const element = all[idx];
-          if (!element || element.tagName !== "SELECT") {
-            return;
-          }
-          element.value = val;
-          element.dispatchEvent(new Event("change", { bubbles: true }));
-        },
-        { sel: selector, idx: index, val: value },
-      )
-      .catch(() => {});
-  });
+  await page
+    .evaluate(
+      ({ sel, idx, val }) => {
+        const all = Array.from(document.querySelectorAll(sel));
+        const element = all[idx];
+        if (!element || element.tagName !== "SELECT") {
+          return;
+        }
+        element.value = val;
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      },
+      { sel: selector, idx: index, val: value },
+    )
+    .catch(() => {});
   await page.waitForTimeout(350 + Math.random() * 1000);
   return true;
 }
@@ -408,9 +428,27 @@ async function tryDemoLogin(page, preferredRole) {
 
   if (!clicked) {
     const target = randomInt(0, Math.min(usersCount - 1, 23));
-    const targetUser = page.locator(".demo-user-button").nth(target);
-    await targetUser.scrollIntoViewIfNeeded().catch(() => {});
-    await targetUser.click().catch(() => {});
+    await page
+      .evaluate(
+        ({ selector, index }) => {
+          const all = Array.from(document.querySelectorAll(selector));
+          const element = all[index];
+          if (!element) {
+            return false;
+          }
+          element.scrollIntoView({ block: "center" });
+          element.dispatchEvent(
+            new MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+            }),
+          );
+          return true;
+        },
+        { selector: ".demo-user-button", index: target },
+      )
+      .catch(() => false);
   }
 
   const loggedIn = await waitForAuthenticatedState(page, 22000);
