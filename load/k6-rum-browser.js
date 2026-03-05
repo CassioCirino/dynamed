@@ -39,6 +39,15 @@ const ROLE_LABEL = {
   admin: "Operacoes",
 };
 
+const ROLE_TAG_LABEL = {
+  patient: "Paciente",
+  doctor: "Medico",
+  receptionist: "Recepcao",
+  admin: "Operacoes",
+  lab: "Laboratorio",
+  nurse: "Enfermagem",
+};
+
 const loginSuccess = new Counter("rum_login_success");
 const loginFailure = new Counter("rum_login_failure");
 const identifySuccess = new Counter("rum_identify_success");
@@ -352,9 +361,18 @@ async function readUserTagFromStorage(page) {
         return "";
       }
 
-      const role = String(user.role || "usuario").trim() || "usuario";
+      const roleRaw = String(user.role || "").trim().toLowerCase();
+      const roleMap = {
+        patient: "Paciente",
+        doctor: "Medico",
+        receptionist: "Recepcao",
+        admin: "Operacoes",
+        lab: "Laboratorio",
+        nurse: "Enfermagem",
+      };
+      const role = roleMap[roleRaw] || "Usuario";
       const identity = String(user.full_name || user.name || user.email || user.id || "desconhecido").trim();
-      return identity ? `${role}:${identity}` : "";
+      return identity ? `${role}: ${identity}` : "";
     }, AUTH_STORAGE_KEY)
     .catch(() => "");
 }
@@ -573,9 +591,10 @@ function buildUserTagFromPayload(user) {
   if (!user) {
     return "";
   }
-  const role = String(user.role || "usuario").trim() || "usuario";
+  const roleRaw = String(user.role || "").trim().toLowerCase();
+  const role = ROLE_TAG_LABEL[roleRaw] || "Usuario";
   const identity = String(user.full_name || user.fullName || user.name || user.email || user.id || "desconhecido").trim();
-  return identity ? `${role}:${identity}` : "";
+  return identity ? `${role}: ${identity}` : "";
 }
 
 function safeJson(response) {
