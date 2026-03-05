@@ -4,12 +4,12 @@ import { browser } from "k6/browser";
 const FRONTEND_URL = __ENV.FRONTEND_URL || "http://localhost:5173";
 const RUM_DURATION = __ENV.RUM_BROWSER_DURATION || "3m";
 const RUM_VUS = Number(__ENV.RUM_BROWSER_VUS || 5);
-const RUM_ANONYMOUS_RATE = Number(__ENV.RUM_BROWSER_ANONYMOUS_RATE || 0.05);
-const RUM_STEPS_MIN = Number(__ENV.RUM_BROWSER_STEPS_MIN || 8);
-const RUM_STEPS_MAX = Number(__ENV.RUM_BROWSER_STEPS_MAX || 20);
+const RUM_ANONYMOUS_RATE = Number(__ENV.RUM_BROWSER_ANONYMOUS_RATE || 0);
+const RUM_STEPS_MIN = Number(__ENV.RUM_BROWSER_STEPS_MIN || 10);
+const RUM_STEPS_MAX = Number(__ENV.RUM_BROWSER_STEPS_MAX || 24);
 const RUM_IDLE_MIN_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MIN_SECONDS || 45);
 const RUM_IDLE_MAX_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MAX_SECONDS || 180);
-const RUM_ROLE_WEIGHTS_RAW = __ENV.RUM_BROWSER_ROLE_WEIGHTS || "patient:55,doctor:20,receptionist:20,admin:5";
+const RUM_ROLE_WEIGHTS_RAW = __ENV.RUM_BROWSER_ROLE_WEIGHTS || "patient:60,doctor:20,receptionist:15,admin:5";
 const APP_PATHS = ["/", "/journeys", "/appointments", "/exams", "/operations", "/patients"];
 const AUTH_STORAGE_KEY = "hospital_demo_auth";
 const ROLE_LABEL = {
@@ -148,6 +148,52 @@ async function waitForAuthenticatedState(page, timeoutMs = 20000) {
   return false;
 }
 
+async function readUserTagFromStorage(page) {
+  return page
+    .evaluate((storageKey) => {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) {
+        return "";
+      }
+      const auth = JSON.parse(raw);
+      const user = auth?.user || null;
+      if (!user) {
+        return "";
+      }
+      const role = String(user.role || "usuario").trim() || "usuario";
+      const identity = String(user.full_name || user.name || user.email || user.id || "desconhecido").trim();
+      return identity ? `${role}:${identity}` : "";
+    }, AUTH_STORAGE_KEY)
+    .catch(() => "");
+}
+
+async function ensureRumIdentify(page, userTag, timeoutMs = 12000) {
+  if (!userTag) {
+    return false;
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const identified = await page
+      .evaluate((tag) => {
+        if (!window.dtrum || typeof window.dtrum.identifyUser !== "function") {
+          return false;
+        }
+        window.dtrum.identifyUser(tag);
+        return true;
+      }, userTag)
+      .catch(() => false);
+
+    if (identified) {
+      return true;
+    }
+
+    await page.waitForTimeout(250);
+  }
+
+  return false;
+}
+
 async function clickDemoUserByRole(page, role) {
   const expectedLabel = ROLE_LABEL[String(role || "").trim()] || "";
   if (!expectedLabel) {
@@ -220,21 +266,30 @@ async function tryDemoLogin(page, preferredRole) {
     await targetUser.click().catch(() => {});
   }
 
-  return waitForAuthenticatedState(page, 20000);
+  if (!(await waitForAuthenticatedState(page, 20000))) {
+    return false;
+  }
+
+  const userTag = await readUserTagFromStorage(page);
+  if (userTag) {
+    await ensureRumIdentify(page, userTag, 8000);
+  }
+
+  return true;
 }
 
 async function apiFallbackDemoLogin(page, preferredRole) {
-  const logged = await page
+  const loginResult = await page
     .evaluate(async (storageKey, role) => {
       const usersResponse = await fetch(`/api/auth/demo-users?role=${role}&limit=24`).catch(() => null);
       if (!usersResponse || !usersResponse.ok) {
-        return false;
+        return { ok: false, userTag: "" };
       }
 
       const usersData = await usersResponse.json().catch(() => ({}));
       const users = Array.isArray(usersData?.users) ? usersData.users : [];
       if (!users.length) {
-        return false;
+        return { ok: false, userTag: "" };
       }
 
       const user = users[Math.floor(Math.random() * users.length)];
@@ -247,12 +302,12 @@ async function apiFallbackDemoLogin(page, preferredRole) {
       }).catch(() => null);
 
       if (!loginResponse || !loginResponse.ok) {
-        return false;
+        return { ok: false, userTag: "" };
       }
 
       const payload = await loginResponse.json().catch(() => ({}));
       if (!payload?.token || !payload?.user) {
-        return false;
+        return { ok: false, userTag: "" };
       }
 
       localStorage.setItem(
@@ -262,11 +317,19 @@ async function apiFallbackDemoLogin(page, preferredRole) {
           user: payload.user,
         }),
       );
-      return true;
-    }, AUTH_STORAGE_KEY, preferredRole || "patient")
-    .catch(() => false);
+      const roleSafe = String(payload.user.role || "usuario").trim() || "usuario";
+      const identitySafe = String(
+        payload.user.full_name || payload.user.name || payload.user.email || payload.user.id || "desconhecido",
+      ).trim();
 
-  if (!logged) {
+      return {
+        ok: true,
+        userTag: identitySafe ? `${roleSafe}:${identitySafe}` : "",
+      };
+    }, AUTH_STORAGE_KEY, preferredRole || "patient")
+    .catch(() => ({ ok: false, userTag: "" }));
+
+  if (!loginResult?.ok) {
     return false;
   }
 
@@ -275,7 +338,15 @@ async function apiFallbackDemoLogin(page, preferredRole) {
     timeout: 60000,
   });
 
-  return waitForAuthenticatedState(page, 15000);
+  if (!(await waitForAuthenticatedState(page, 15000))) {
+    return false;
+  }
+
+  if (loginResult?.userTag) {
+    await ensureRumIdentify(page, loginResult.userTag, 8000);
+  }
+
+  return true;
 }
 
 async function doLoggedInStep(page) {
@@ -364,7 +435,7 @@ export default async function () {
       }
     }
 
-    const hops = randomInt(clamp(RUM_STEPS_MIN, 1, 50), clamp(RUM_STEPS_MAX, 1, 80));
+    const hops = randomInt(clamp(RUM_STEPS_MIN, 10, 60), clamp(RUM_STEPS_MAX, 10, 90));
     for (let i = 0; i < hops; i += 1) {
       if (isLoggedIn) {
         await doLoggedInStep(page);
