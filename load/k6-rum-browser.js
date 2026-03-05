@@ -512,7 +512,7 @@ function safeJson(response) {
 
 function loginViaBackendApi(role) {
   const usersRes = http.get(`${FRONTEND_URL}/api/auth/demo-users?role=${encodeURIComponent(role)}&limit=24`, {
-    timeout: "30s",
+    timeout: "12s",
   });
   if (!usersRes || usersRes.status !== 200) {
     return { ok: false, reason: `demo-users-status-${usersRes?.status || "no-response"}` };
@@ -533,7 +533,7 @@ function loginViaBackendApi(role) {
     headers: {
       "Content-Type": "application/json",
     },
-    timeout: "30s",
+    timeout: "12s",
   });
   if (!loginRes || loginRes.status !== 200) {
     return { ok: false, reason: `demo-login-status-${loginRes?.status || "no-response"}` };
@@ -573,10 +573,13 @@ async function applyAuthIntoBrowserStorage(page, authPayload) {
 }
 
 async function robustDemoLogin(page, preferredRole) {
+  console.error(`[rum-phase] role=${preferredRole} step=backend-api-login-start`);
   const apiLogin = loginViaBackendApi(preferredRole || "patient");
   if (apiLogin.ok) {
+    console.error(`[rum-phase] role=${preferredRole} step=backend-api-login-success`);
     const applied = await applyAuthIntoBrowserStorage(page, apiLogin.auth);
     if (applied) {
+      console.error(`[rum-phase] role=${preferredRole} step=localstorage-applied`);
       await page.goto(`${FRONTEND_URL}/`, {
         waitUntil: "domcontentloaded",
         timeout: 60000,
@@ -584,12 +587,12 @@ async function robustDemoLogin(page, preferredRole) {
       const loggedIn = await waitForAuthenticatedState(page, 20000);
       if (loggedIn) {
         const identifyOk = await ensureRumIdentify(page, apiLogin.userTag, 9000);
-        return {
-          loggedIn: true,
-          identifyOk,
-          userTag: apiLogin.userTag,
-          source: "backend-api",
-        };
+      return {
+        loggedIn: true,
+        identifyOk,
+        userTag: apiLogin.userTag,
+        source: "backend-api",
+      };
       }
       return {
         loggedIn: false,
@@ -600,13 +603,16 @@ async function robustDemoLogin(page, preferredRole) {
     }
   }
 
+  console.error(`[rum-phase] role=${preferredRole} step=backend-api-login-failed reason=${apiLogin.reason || "unknown"}`);
   let uiLogin = await apiFallbackDemoLogin(page, preferredRole);
   if (uiLogin.loggedIn) {
+    console.error(`[rum-phase] role=${preferredRole} step=browser-fetch-login-success`);
     return { ...uiLogin, source: "browser-fetch" };
   }
 
   uiLogin = await tryDemoLogin(page, preferredRole);
   if (uiLogin.loggedIn) {
+    console.error(`[rum-phase] role=${preferredRole} step=ui-demo-login-success`);
     return { ...uiLogin, source: "ui-demo-button" };
   }
 
@@ -763,14 +769,17 @@ export default async function () {
   let actionCount = 0;
 
   try {
+    console.error(`[rum-phase] role=${preferredRole} step=open-context-start`);
     const opened = await openContextAndPage();
     context = opened.context;
     page = opened.page;
+    console.error(`[rum-phase] role=${preferredRole} step=open-context-ok`);
 
     await page.goto(`${FRONTEND_URL}/login`, {
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
+    console.error(`[rum-phase] role=${preferredRole} step=login-page-loaded`);
     await page.waitForTimeout(600 + Math.random() * 1100);
 
     if (!shouldStayAnonymous) {
