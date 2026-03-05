@@ -584,7 +584,11 @@
       });
 
       document.getElementById("rumStartBtn").addEventListener("click", async () => {
+        const infoEl = document.getElementById("info-rum-front");
         try {
+          if (infoEl) {
+            infoEl.textContent = "Iniciando carga de frontend RUM...";
+          }
           const payload = {
             sessionsPerMinute: Number(document.getElementById("rumSessionsPerMinute").value || 0),
             vus: Number(document.getElementById("rumVus").value || 3),
@@ -598,19 +602,31 @@
 
           const result = await apiCall("/api/scenarios/rum-front/start", payload);
           showMessage("ok", result.message || "Frontend RUM iniciado.");
+          setRumScenarioInfo(result.scenarios?.["rum-front"]);
           await refreshStatus();
         } catch (error) {
           showMessage("error", error.message);
+          if (infoEl) {
+            infoEl.textContent = `Falha ao iniciar RUM: ${error.message}`;
+          }
         }
       });
 
       document.getElementById("rumStopBtn").addEventListener("click", async () => {
+        const infoEl = document.getElementById("info-rum-front");
         try {
+          if (infoEl) {
+            infoEl.textContent = "Encerrando carga de frontend RUM...";
+          }
           const result = await apiCall("/api/scenarios/rum-front/stop", {});
           showMessage("ok", result.message || "Frontend RUM encerrado.");
+          setRumScenarioInfo(result.scenarios?.["rum-front"]);
           await refreshStatus();
         } catch (error) {
           showMessage("error", error.message);
+          if (infoEl) {
+            infoEl.textContent = `Falha ao encerrar RUM: ${error.message}`;
+          }
         }
       });
 
