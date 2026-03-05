@@ -4,12 +4,13 @@ import { browser } from "k6/browser";
 const FRONTEND_URL = __ENV.FRONTEND_URL || "http://localhost:5173";
 const RUM_DURATION = __ENV.RUM_BROWSER_DURATION || "3m";
 const RUM_VUS = Number(__ENV.RUM_BROWSER_VUS || 5);
-const RUM_ANONYMOUS_RATE = Number(__ENV.RUM_BROWSER_ANONYMOUS_RATE || 0.15);
-const RUM_STEPS_MIN = Number(__ENV.RUM_BROWSER_STEPS_MIN || 5);
-const RUM_STEPS_MAX = Number(__ENV.RUM_BROWSER_STEPS_MAX || 12);
-const RUM_IDLE_MIN_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MIN_SECONDS || 20);
-const RUM_IDLE_MAX_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MAX_SECONDS || 90);
+const RUM_ANONYMOUS_RATE = Number(__ENV.RUM_BROWSER_ANONYMOUS_RATE || 0.05);
+const RUM_STEPS_MIN = Number(__ENV.RUM_BROWSER_STEPS_MIN || 8);
+const RUM_STEPS_MAX = Number(__ENV.RUM_BROWSER_STEPS_MAX || 20);
+const RUM_IDLE_MIN_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MIN_SECONDS || 45);
+const RUM_IDLE_MAX_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MAX_SECONDS || 180);
 const APP_PATHS = ["/", "/journeys", "/appointments", "/exams", "/operations", "/patients"];
+const AUTH_STORAGE_KEY = "hospital_demo_auth";
 
 export const options = {
   scenarios: {
@@ -66,6 +67,23 @@ async function waitForDemoUsers(page, timeoutMs = 12000) {
   return 0;
 }
 
+async function waitForAuthenticatedState(page, timeoutMs = 20000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const currentUrl = String(page.url() || "");
+    const hasAuth = await page
+      .evaluate((storageKey) => Boolean(localStorage.getItem(storageKey)), AUTH_STORAGE_KEY)
+      .catch(() => false);
+
+    if (!currentUrl.includes("/login") || hasAuth) {
+      return true;
+    }
+
+    await page.waitForTimeout(250);
+  }
+  return false;
+}
+
 async function tryDemoLogin(page) {
   await clickIfVisible(page, [
     "button:has-text('Acesso demonstracao')",
@@ -74,22 +92,84 @@ async function tryDemoLogin(page) {
     "button:has-text('Entrar com demo')",
   ]);
 
-  await page.waitForTimeout(350 + Math.random() * 800);
-  const usersCount = await waitForDemoUsers(page, 14000);
+  await page.waitForTimeout(450 + Math.random() * 900);
+  let usersCount = await waitForDemoUsers(page, 16000);
+  if (!usersCount) {
+    await clickIfVisible(page, [
+      "button:has-text('Acesso demonstracao')",
+      "button:has-text('Login demo')",
+      "button:has-text('Entrar demo')",
+      "button:has-text('Entrar com demo')",
+    ]);
+    usersCount = await waitForDemoUsers(page, 8000);
+  }
   if (!usersCount) {
     return false;
   }
 
-  const target = Math.floor(Math.random() * Math.min(usersCount, 24));
-  await page.locator(".demo-user-button").nth(target).click().catch(() => {});
+  const target = randomInt(0, Math.min(usersCount - 1, 23));
+  const targetUser = page.locator(".demo-user-button").nth(target);
+  await targetUser.scrollIntoViewIfNeeded().catch(() => {});
+  await targetUser.click().catch(() => {});
 
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    await page.waitForTimeout(250);
-    if (!String(page.url() || "").includes("/login")) {
+  return waitForAuthenticatedState(page, 20000);
+}
+
+async function apiFallbackDemoLogin(page) {
+  const logged = await page
+    .evaluate(async (storageKey) => {
+      const roles = ["patient", "doctor", "receptionist", "admin"];
+      const role = roles[Math.floor(Math.random() * roles.length)];
+      const usersResponse = await fetch(`/api/auth/demo-users?role=${role}&limit=24`).catch(() => null);
+      if (!usersResponse || !usersResponse.ok) {
+        return false;
+      }
+
+      const usersData = await usersResponse.json().catch(() => ({}));
+      const users = Array.isArray(usersData?.users) ? usersData.users : [];
+      if (!users.length) {
+        return false;
+      }
+
+      const user = users[Math.floor(Math.random() * users.length)];
+      const loginResponse = await fetch("/api/auth/demo-login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ userId: user.id }),
+      }).catch(() => null);
+
+      if (!loginResponse || !loginResponse.ok) {
+        return false;
+      }
+
+      const payload = await loginResponse.json().catch(() => ({}));
+      if (!payload?.token || !payload?.user) {
+        return false;
+      }
+
+      localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          token: payload.token,
+          user: payload.user,
+        }),
+      );
       return true;
-    }
+    }, AUTH_STORAGE_KEY)
+    .catch(() => false);
+
+  if (!logged) {
+    return false;
   }
-  return false;
+
+  await page.goto(`${FRONTEND_URL}/`, {
+    waitUntil: "domcontentloaded",
+    timeout: 60000,
+  });
+
+  return waitForAuthenticatedState(page, 15000);
 }
 
 export default async function () {
@@ -107,6 +187,9 @@ export default async function () {
 
     if (!shouldStayAnonymous) {
       isLoggedIn = await tryDemoLogin(page);
+      if (!isLoggedIn) {
+        isLoggedIn = await apiFallbackDemoLogin(page);
+      }
       if (!isLoggedIn) {
         await page.goto(`${FRONTEND_URL}/login`, {
           waitUntil: "domcontentloaded",
