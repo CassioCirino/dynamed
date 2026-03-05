@@ -301,8 +301,35 @@
 
         <section class="panel">
           <h2>Cenarios pre-configurados (Dynatrace)</h2>
-          <p class="tiny">Presets prontos para demo e gatilhos de alerta no Dynatrace.</p>
+          <p class="tiny">Use os presets de causa raiz para forcar problema com origem clara: Banco, Backend ou Frontend.</p>
           <div class="card-grid">
+            <article class="panel">
+              <h3>Causa raiz - Banco</h3>
+              <p class="tiny">Carga moderada + PostgreSQL indisponivel por 5 minutos.</p>
+              <div class="btn-row">
+                <button class="btn-danger" data-preset="root-db">Iniciar preset</button>
+              </div>
+              <p class="tiny" id="info-preset-root-db"></p>
+            </article>
+
+            <article class="panel">
+              <h3>Causa raiz - Backend</h3>
+              <p class="tiny">Carga alta + erro intermitente + latencia na API por 7 minutos.</p>
+              <div class="btn-row">
+                <button class="btn-danger" data-preset="root-backend">Iniciar preset</button>
+              </div>
+              <p class="tiny" id="info-preset-root-backend"></p>
+            </article>
+
+            <article class="panel">
+              <h3>Causa raiz - Frontend</h3>
+              <p class="tiny">Frontend indisponivel por 5 minutos, backend e banco sem caos.</p>
+              <div class="btn-row">
+                <button class="btn-danger" data-preset="root-frontend">Iniciar preset</button>
+              </div>
+              <p class="tiny" id="info-preset-root-frontend"></p>
+            </article>
+
             <article class="panel">
               <h3>API - Erro intermitente</h3>
               <p class="tiny">30% de falhas HTTP 500 por 5 minutos na API (exceto auth).</p>
@@ -578,6 +605,9 @@
           setScenarioInfo("chaos-latency", data.scenarios?.["chaos-latency"]);
           setScenarioInfo("preset-api-degradada", data.scenarios?.["preset-api-degradada"]);
           setScenarioInfo("preset-db-carga", data.scenarios?.["preset-db-carga"]);
+          setScenarioInfo("preset-root-db", data.scenarios?.["preset-root-db"]);
+          setScenarioInfo("preset-root-backend", data.scenarios?.["preset-root-backend"]);
+          setScenarioInfo("preset-root-frontend", data.scenarios?.["preset-root-frontend"]);
           setRumScenarioInfo(data.scenarios?.["rum-front"]);
           renderLoadState(data.load, data.loadError);
           refreshInfo.textContent = `Ultima atualizacao: ${new Date().toLocaleTimeString("pt-BR")}`;
@@ -672,6 +702,21 @@
         if (presetId === "combo-db-carga") {
           return apiCall("/api/scenarios/presets/start", {
             preset: "db-carga",
+          });
+        }
+        if (presetId === "root-db") {
+          return apiCall("/api/scenarios/presets/start", {
+            preset: "root-db",
+          });
+        }
+        if (presetId === "root-backend") {
+          return apiCall("/api/scenarios/presets/start", {
+            preset: "root-backend",
+          });
+        }
+        if (presetId === "root-frontend") {
+          return apiCall("/api/scenarios/presets/start", {
+            preset: "root-frontend",
           });
         }
         if (presetId === "preset-reset-total" || presetId === "api-chaos-reset") {

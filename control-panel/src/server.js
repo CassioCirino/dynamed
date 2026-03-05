@@ -29,6 +29,8 @@ const DEFAULT_ADMIN_EMAIL = String(process.env.DEFAULT_ADMIN_EMAIL || "admin@hos
 const DEFAULT_ADMIN_PASSWORD = String(process.env.DEFAULT_ADMIN_PASSWORD || "dyantrace").trim();
 const SIMULATION_CONTROL_KEY = String(process.env.SIMULATION_CONTROL_KEY || "").trim();
 const LOAD_STATE_CACHE_MS = Math.max(1000, Number(process.env.CONTROL_PANEL_LOAD_STATE_CACHE_MS || 15000));
+const CONTROL_PANEL_ENABLE_BACKEND_POLL =
+  String(process.env.CONTROL_PANEL_ENABLE_BACKEND_POLL || "false").trim().toLowerCase() === "true";
 
 const docker = new Docker({ socketPath: "/var/run/docker.sock" });
 const scenarioState = new Map();
@@ -49,6 +51,9 @@ const CHAOS_ERROR_RATE_SCENARIO_ID = "chaos-error-rate";
 const CHAOS_LATENCY_SCENARIO_ID = "chaos-latency";
 const PRESET_API_DEGRADADA_SCENARIO_ID = "preset-api-degradada";
 const PRESET_DB_CARGA_SCENARIO_ID = "preset-db-carga";
+const PRESET_ROOT_DB_SCENARIO_ID = "preset-root-db";
+const PRESET_ROOT_BACKEND_SCENARIO_ID = "preset-root-backend";
+const PRESET_ROOT_FRONTEND_SCENARIO_ID = "preset-root-frontend";
 const ALLOWED_LOAD_PROFILES = new Set(["light", "moderate", "heavy", "extreme", "custom"]);
 const ALLOWED_LOAD_ROLES = new Set(["patient", "doctor", "receptionist", "admin"]);
 const DEFAULT_LOAD_ROLES = ["patient", "doctor", "receptionist"];
@@ -1061,6 +1066,9 @@ async function stopAllScenarios() {
   }
   scenarioState.delete(PRESET_API_DEGRADADA_SCENARIO_ID);
   scenarioState.delete(PRESET_DB_CARGA_SCENARIO_ID);
+  scenarioState.delete(PRESET_ROOT_DB_SCENARIO_ID);
+  scenarioState.delete(PRESET_ROOT_BACKEND_SCENARIO_ID);
+  scenarioState.delete(PRESET_ROOT_FRONTEND_SCENARIO_ID);
 }
 
 async function startPresetApiDegradada() {
@@ -1120,6 +1128,100 @@ async function startPresetDbCarga() {
   });
 }
 
+async function startPresetRootDb() {
+  const durationSeconds = 300;
+  await stopAllScenarios();
+
+  await startLoadFromControlPanel({
+    profile: "moderate",
+    sessions: 110,
+    durationSeconds,
+    rampUpSeconds: 30,
+    requestPacingMs: 1100,
+    jitterMs: 400,
+    roles: ["patient", "doctor", "receptionist"],
+  });
+
+  await startOutageScenario({
+    id: "db",
+    label: "Banco - PostgreSQL indisponivel",
+    containerName: POSTGRES_CONTAINER,
+    durationSeconds,
+  });
+
+  setTimedScenarioState({
+    id: PRESET_ROOT_DB_SCENARIO_ID,
+    type: "preset_root_cause",
+    label: "Causa raiz - Banco",
+    durationSeconds,
+    details: {
+      target: "db",
+      loadProfile: "moderate",
+      sessions: 110,
+      dbOutageSeconds: durationSeconds,
+    },
+    note: "Banco indisponivel com carga ativa para forcar erro com causa raiz no PostgreSQL.",
+  });
+}
+
+async function startPresetRootBackend() {
+  const durationSeconds = 420;
+  await stopAllScenarios();
+
+  await startLoadFromControlPanel({
+    profile: "heavy",
+    sessions: 140,
+    durationSeconds,
+    rampUpSeconds: 35,
+    requestPacingMs: 1000,
+    jitterMs: 450,
+    roles: ["patient", "doctor", "receptionist", "admin"],
+  });
+
+  await startApiErrorRateChaos({ percent: 55, durationSeconds });
+  await startApiLatencyChaos({ baseMs: 2200, jitterMs: 900, durationSeconds });
+
+  setTimedScenarioState({
+    id: PRESET_ROOT_BACKEND_SCENARIO_ID,
+    type: "preset_root_cause",
+    label: "Causa raiz - Backend",
+    durationSeconds,
+    details: {
+      target: "backend",
+      loadProfile: "heavy",
+      sessions: 140,
+      errorRatePercent: 55,
+      latencyBaseMs: 2200,
+      latencyJitterMs: 900,
+    },
+    note: "Erro e latencia na API com banco ativo para destacar causa raiz no backend.",
+  });
+}
+
+async function startPresetRootFrontend() {
+  const durationSeconds = 300;
+  await stopAllScenarios();
+
+  await startOutageScenario({
+    id: "dev-front",
+    label: "DEV - Frontend indisponivel",
+    containerName: FRONTEND_CONTAINER,
+    durationSeconds,
+  });
+
+  setTimedScenarioState({
+    id: PRESET_ROOT_FRONTEND_SCENARIO_ID,
+    type: "preset_root_cause",
+    label: "Causa raiz - Frontend",
+    durationSeconds,
+    details: {
+      target: "frontend",
+      frontendOutageSeconds: durationSeconds,
+    },
+    note: "Indisponibilidade direta do frontend para causa raiz no servico web.",
+  });
+}
+
 async function startPresetScenario(presetId) {
   const preset = String(presetId || "").trim();
   if (preset === "api-degradada") {
@@ -1134,6 +1236,27 @@ async function startPresetScenario(presetId) {
     return {
       preset,
       message: "Preset banco indisponivel com carga iniciado.",
+    };
+  }
+  if (preset === "root-db") {
+    await startPresetRootDb();
+    return {
+      preset,
+      message: "Preset de causa raiz Banco iniciado.",
+    };
+  }
+  if (preset === "root-backend") {
+    await startPresetRootBackend();
+    return {
+      preset,
+      message: "Preset de causa raiz Backend iniciado.",
+    };
+  }
+  if (preset === "root-frontend") {
+    await startPresetRootFrontend();
+    return {
+      preset,
+      message: "Preset de causa raiz Frontend iniciado.",
     };
   }
   throw new Error("Preset invalido.");
@@ -1170,7 +1293,7 @@ app.get("/api/status", requireAuth, async (_req, res, next) => {
     syncRumScenario(containers);
     const nowMs = Date.now();
 
-    if (nowMs - loadStateCache.atMs >= LOAD_STATE_CACHE_MS) {
+    if (CONTROL_PANEL_ENABLE_BACKEND_POLL && nowMs - loadStateCache.atMs >= LOAD_STATE_CACHE_MS) {
       try {
         const state = await backendRequest("/api/operations/state", { method: "GET" });
         loadStateCache.load = state?.load || null;
@@ -1184,6 +1307,8 @@ app.get("/api/status", requireAuth, async (_req, res, next) => {
           syncLoadScenario(null);
         }
       }
+    } else if (!CONTROL_PANEL_ENABLE_BACKEND_POLL) {
+      loadStateCache.error = null;
     }
 
     return res.json({
