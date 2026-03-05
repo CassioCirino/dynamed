@@ -275,13 +275,20 @@ function startDbCanary(durationSeconds, intervalMs = 1000) {
   stopDbCanary();
   const safeIntervalMs = Math.max(300, Math.min(5000, Number(intervalMs || 1000)));
   const safeDurationMs = Math.max(30000, Number(durationSeconds || 60) * 1000);
-  const baseUrl = BACKEND_INTERNAL_URL;
+  const endpoints = ["/api/dashboard/summary", "/api/patients?pageSize=20", "/health/ready"];
+  let index = 0;
 
   presetAuxState.dbCanaryInterval = setInterval(async () => {
+    const endpoint = endpoints[index % endpoints.length];
+    index += 1;
     try {
-      await fetchWithTimeout(`${baseUrl}/health/ready`, { method: "GET" }, 4000);
+      if (endpoint.startsWith("/api/")) {
+        await backendRequest(endpoint, { method: "GET", retryAuth: false });
+      } else {
+        await fetchWithTimeout(`${BACKEND_INTERNAL_URL}${endpoint}`, { method: "GET" }, 4000);
+      }
     } catch (_error) {
-      // no-op: o objetivo e gerar evidencia de disponibilidade/indisponibilidade no backend
+      // no-op: o objetivo e gerar evidencia continua de falha ligada ao banco
     }
   }, safeIntervalMs);
   presetAuxState.dbCanaryInterval.unref();
@@ -1411,7 +1418,7 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
   const sessions = anomalyMode ? 260 : 180;
   const requestPacingMs = anomalyMode ? 750 : 950;
   const jitterMs = anomalyMode ? 250 : 350;
-  const rumSessionsPerMinute = anomalyMode ? 4 : 2;
+  const rumSessionsPerMinute = anomalyMode ? 2 : 1;
 
   await stopAllScenarios();
   await ensureCoreServicesHealthy();
