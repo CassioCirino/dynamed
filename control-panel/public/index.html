@@ -552,7 +552,10 @@
         const sessionsPerMinute = Number(details.sessionsPerMinute || 0);
         const vus = Number(details.vus || 0);
         const durationMinutes = Number(details.durationMinutes || 0);
-        const modeText = sessionsPerMinute > 0 ? `${sessionsPerMinute} sessoes/min` : `${vus} VUs`;
+        let modeText = "desconhecido";
+        if (sessionsPerMinute > 0) modeText = `${sessionsPerMinute} sessoes/min`;
+        else if (vus > 0) modeText = `${vus} VUs`;
+        const sourceText = details.source === "container-detected" ? " | origem=container" : "";
 
         if (details.status === "error") {
           target.textContent = scenario.note || "Falha ao iniciar o RUM.";
@@ -562,11 +565,12 @@
         if (!scenario.running || details.status === "scheduled") {
           const startAt = details.startAt ? new Date(details.startAt).toLocaleString("pt-BR") : "-";
           const endAt = details.endAt ? new Date(details.endAt).toLocaleString("pt-BR") : "-";
-          target.textContent = `Agendado | inicio=${startAt} | fim=${endAt} | carga=${modeText}.`;
+          target.textContent = `Agendado | inicio=${startAt} | fim=${endAt} | carga=${modeText}${sourceText}.`;
           return;
         }
 
-        target.textContent = `Ativo. Restante: ${formatRemaining(scenario.remainingSeconds)} | carga=${modeText} | duracao=${durationMinutes}min.`;
+        const durationText = durationMinutes > 0 ? `${durationMinutes}min` : "desconhecida";
+        target.textContent = `Ativo. Restante: ${formatRemaining(scenario.remainingSeconds)} | carga=${modeText} | duracao=${durationText}${sourceText}.`;
       }
 
       function renderLoadState(load, loadError) {

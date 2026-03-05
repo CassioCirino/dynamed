@@ -263,6 +263,53 @@ function parseDateTime(value) {
   return parsed;
 }
 
+function parseK6DurationToMinutes(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return 0;
+
+  let totalSeconds = 0;
+  let matched = false;
+  const tokenRegex = /(\d+(?:\.\d+)?)(ms|s|m|h|d)/g;
+  let tokenMatch = tokenRegex.exec(raw);
+  while (tokenMatch) {
+    matched = true;
+    const amount = Number(tokenMatch[1]);
+    const unit = tokenMatch[2];
+    if (Number.isFinite(amount) && amount > 0) {
+      if (unit === "ms") totalSeconds += amount / 1000;
+      else if (unit === "s") totalSeconds += amount;
+      else if (unit === "m") totalSeconds += amount * 60;
+      else if (unit === "h") totalSeconds += amount * 3600;
+      else if (unit === "d") totalSeconds += amount * 86400;
+    }
+    tokenMatch = tokenRegex.exec(raw);
+  }
+
+  if (!matched) {
+    const plainSeconds = Number(raw);
+    if (Number.isFinite(plainSeconds) && plainSeconds > 0) {
+      totalSeconds = plainSeconds;
+    }
+  }
+
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) {
+    return 0;
+  }
+  return Math.max(1, Math.round(totalSeconds / 60));
+}
+
+function preferPositiveNumber(primaryValue, fallbackValue = 0) {
+  const primary = Number(primaryValue || 0);
+  if (Number.isFinite(primary) && primary > 0) {
+    return primary;
+  }
+  const fallback = Number(fallbackValue || 0);
+  if (Number.isFinite(fallback) && fallback > 0) {
+    return fallback;
+  }
+  return 0;
+}
+
 function scheduleRumAutoStop(endAtMs) {
   if (!Number.isFinite(endAtMs) || endAtMs <= Date.now()) {
     return;
@@ -693,7 +740,39 @@ function syncLoadScenario(loadState) {
   });
 }
 
-function syncRumScenario(containers) {
+async function inspectRumContainerRuntime() {
+  const container = docker.getContainer(RUM_BROWSER_CONTAINER);
+  let inspect;
+  try {
+    inspect = await container.inspect();
+  } catch (_error) {
+    return null;
+  }
+
+  if (!inspect?.State?.Running) {
+    return null;
+  }
+
+  const envMap = envListToMap(inspect?.Config?.Env || []);
+  const sessionsPerMinute = clampNumber(envMap.RUM_BROWSER_SESSIONS_PER_MINUTE, 0, 1200, 0);
+  const vus = clampNumber(envMap.RUM_BROWSER_VUS, 1, 500, 0);
+  const durationMinutes = parseK6DurationToMinutes(envMap.RUM_BROWSER_DURATION);
+  const startedAtMs = Date.parse(String(inspect?.State?.StartedAt || ""));
+  const endsAtMs = Number.isFinite(startedAtMs) && durationMinutes > 0 ? startedAtMs + durationMinutes * 60 * 1000 : 0;
+
+  return {
+    startedAt: Number.isFinite(startedAtMs) ? new Date(startedAtMs).toISOString() : new Date().toISOString(),
+    endsAtMs,
+    mode: sessionsPerMinute > 0 ? "sessions_per_minute" : "vus",
+    sessionsPerMinute,
+    vus,
+    durationMinutes,
+    containerStatus: String(inspect?.State?.Status || "running"),
+    source: "container-detected",
+  };
+}
+
+async function syncRumScenario(containers) {
   const rum = containers?.[RUM_BROWSER_CONTAINER];
   const current = scenarioState.get(RUM_SCENARIO_ID);
 
@@ -705,24 +784,41 @@ function syncRumScenario(containers) {
     return;
   }
 
+  const shouldInspectContainer =
+    preferPositiveNumber(current?.details?.sessionsPerMinute, 0) <= 0 &&
+    preferPositiveNumber(current?.details?.vus, 0) <= 0 &&
+    preferPositiveNumber(current?.details?.durationMinutes, 0) <= 0;
+
+  let runtime = null;
+  if (shouldInspectContainer) {
+    runtime = await inspectRumContainerRuntime();
+  }
+
+  const sessionsPerMinute = preferPositiveNumber(current?.details?.sessionsPerMinute, runtime?.sessionsPerMinute);
+  const vus = preferPositiveNumber(current?.details?.vus, runtime?.vus);
+  const durationMinutes = preferPositiveNumber(current?.details?.durationMinutes, runtime?.durationMinutes);
   const nowIso = new Date().toISOString();
   scenarioState.set(RUM_SCENARIO_ID, {
     id: RUM_SCENARIO_ID,
     type: "rum_browser",
     running: true,
     label: "Frontend RUM (navegador real)",
-    startedAt: current?.startedAt || nowIso,
-    endsAtMs: Number(current?.endsAtMs || 0),
+    startedAt: current?.startedAt || runtime?.startedAt || nowIso,
+    endsAtMs: Number(current?.endsAtMs || 0) || Number(runtime?.endsAtMs || 0),
     details: {
-      mode: current?.details?.mode || "vus",
-      sessionsPerMinute: Number(current?.details?.sessionsPerMinute || 0),
-      vus: Number(current?.details?.vus || 0),
-      durationMinutes: Number(current?.details?.durationMinutes || 0),
+      mode: sessionsPerMinute > 0 ? "sessions_per_minute" : current?.details?.mode || runtime?.mode || "vus",
+      sessionsPerMinute,
+      vus,
+      durationMinutes,
       status: "running",
       container: RUM_BROWSER_CONTAINER,
-      containerStatus: rum.status || "running",
+      containerStatus: runtime?.containerStatus || rum.status || "running",
+      source: current?.details?.source || runtime?.source || "panel",
     },
-    note: "Sessoes reais de navegador para alimentar frontend e backend.",
+    note:
+      runtime?.source === "container-detected"
+        ? "RUM ativo detectado no container (estado recuperado automaticamente no painel)."
+        : "Sessoes reais de navegador para alimentar frontend e backend.",
   });
 }
 
@@ -1040,6 +1136,30 @@ async function resetApiChaosScenarios() {
   }
 }
 
+async function disableSimulationJobScheduler() {
+  const payload = {
+    enabled: false,
+    mode: "interval",
+    intervalMinutes: 30,
+    runOnStart: false,
+    payload: {
+      profile: "moderate",
+      roles: ["patient", "doctor", "receptionist"],
+      sessions: 40,
+      durationSeconds: 300,
+      rampUpSeconds: 30,
+      requestPacingMs: 1200,
+      jitterMs: 450,
+    },
+  };
+
+  return backendRequest("/api/operations/jobs/simulation", {
+    method: "POST",
+    payload,
+    requiresControlKey: true,
+  });
+}
+
 async function stopAllScenarios() {
   await stopOutageScenario("dev-front");
   await stopOutageScenario("dev-api");
@@ -1060,6 +1180,11 @@ async function stopAllScenarios() {
     // no-op
   }
   try {
+    await disableSimulationJobScheduler();
+  } catch (_error) {
+    // no-op
+  }
+  try {
     await resetApiChaosScenarios();
   } catch (_error) {
     // no-op
@@ -1069,6 +1194,9 @@ async function stopAllScenarios() {
   scenarioState.delete(PRESET_ROOT_DB_SCENARIO_ID);
   scenarioState.delete(PRESET_ROOT_BACKEND_SCENARIO_ID);
   scenarioState.delete(PRESET_ROOT_FRONTEND_SCENARIO_ID);
+  loadStateCache.atMs = Date.now();
+  loadStateCache.load = null;
+  loadStateCache.error = null;
 }
 
 function resolvePresetDurationSeconds(rawOptions = {}, fallbackSeconds = 300) {
@@ -1355,7 +1483,7 @@ app.post("/api/login", (req, res) => {
 app.get("/api/status", requireAuth, async (_req, res, next) => {
   try {
     const containers = await getContainerStatusMap();
-    syncRumScenario(containers);
+    await syncRumScenario(containers);
     const nowMs = Date.now();
 
     if (CONTROL_PANEL_ENABLE_BACKEND_POLL && nowMs - loadStateCache.atMs >= LOAD_STATE_CACHE_MS) {
