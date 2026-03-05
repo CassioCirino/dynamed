@@ -162,9 +162,26 @@ async function countElements(page, selector) {
 async function clickIfVisible(page, selectors) {
   for (const selector of selectors) {
     if ((await countElements(page, selector)) > 0) {
-      const loc = page.locator(selector);
-      await loc.first().click().catch(() => {});
-      return true;
+      const clicked = await page
+        .evaluate((sel) => {
+          const element = document.querySelector(sel);
+          if (!element) {
+            return false;
+          }
+          element.scrollIntoView({ block: "center" });
+          element.dispatchEvent(
+            new MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+            }),
+          );
+          return true;
+        }, selector)
+        .catch(() => false);
+      if (clicked) {
+        return true;
+      }
     }
   }
   return false;
@@ -253,9 +270,30 @@ async function fillInputIfVisible(page, selectors, value) {
     if ((await countElements(page, selector)) <= 0) {
       continue;
     }
-    const target = page.locator(selector).first();
-    await target.click().catch(() => {});
-    await target.fill(String(value || "")).catch(() => {});
+    const filled = await page
+      .evaluate(
+        ({ sel, val }) => {
+          const element = document.querySelector(sel);
+          if (!element) {
+            return false;
+          }
+          if (typeof element.focus === "function") {
+            element.focus();
+          }
+          if (!("value" in element)) {
+            return false;
+          }
+          element.value = String(val ?? "");
+          element.dispatchEvent(new Event("input", { bubbles: true }));
+          element.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        },
+        { sel: selector, val: String(value || "") },
+      )
+      .catch(() => false);
+    if (!filled) {
+      continue;
+    }
     await page.waitForTimeout(250 + Math.random() * 700);
     return true;
   }
