@@ -365,29 +365,15 @@ async function startDbRootCauseChaos(durationSeconds, anomalyMode = false) {
   await stopDbRootCauseChaos();
   const safeDuration = Math.max(60, Math.min(3600, Number(durationSeconds || 300)));
   const untilMs = Date.now() + safeDuration * 1000;
-  const workerCount = anomalyMode ? 12 : 8;
 
   const lockSql = `
     SET application_name = ${quoteSqlLiteral(`${DB_ROOT_CAUSE_APP_PREFIX}_lock`)};
     BEGIN;
-    LOCK TABLE appointments, exams, incidents IN ACCESS EXCLUSIVE MODE;
+    LOCK TABLE users IN ACCESS EXCLUSIVE MODE;
     SELECT pg_sleep(${safeDuration});
     COMMIT;
   `;
   await runPostgresSqlDetached(lockSql);
-
-  for (let i = 0; i < workerCount; i += 1) {
-    const connectionSql = `
-      SET application_name = ${quoteSqlLiteral(`${DB_ROOT_CAUSE_APP_PREFIX}_conn`)};
-      SELECT pg_sleep(${safeDuration});
-    `;
-    runPostgresSqlDetached(connectionSql).catch(() => {
-      // no-op: parte das conexoes pode falhar por limite atingido, o que e esperado
-    });
-    if (i % 8 === 7) {
-      await sleep(50);
-    }
-  }
 
   presetAuxState.dbChaosActiveUntilMs = untilMs;
   presetAuxState.dbChaosStopTimeout = setTimeout(() => {
@@ -399,9 +385,9 @@ async function startDbRootCauseChaos(durationSeconds, anomalyMode = false) {
 
   return {
     durationSeconds: safeDuration,
-    workerCount,
-    lockTables: ["appointments", "exams", "incidents"],
-    mode: "lock_and_connection_pressure",
+    workerCount: 0,
+    lockTables: ["users"],
+    mode: "transaction_lock",
   };
 }
 
@@ -1567,6 +1553,7 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
 
   await stopAllScenarios();
   await ensureCoreServicesHealthy();
+  await resetApiChaosScenarios();
 
   const rumTraffic = await startEvidenceTraffic({
     durationSeconds: safeDuration,
