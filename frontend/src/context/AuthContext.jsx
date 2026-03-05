@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, clearStoredAuth, getStoredAuth, setApiToken, setStoredAuth } from "../lib/api";
+import { identifyRumUser } from "../lib/dynatrace-rum";
 import { AuthContext } from "./auth-context";
 
 export function AuthProvider({ children }) {
@@ -42,6 +43,10 @@ export function AuthProvider({ children }) {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    identifyRumUser(auth?.user || null);
+  }, [auth?.user]);
 
   const value = useMemo(
     () => ({
