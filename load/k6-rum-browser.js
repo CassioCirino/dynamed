@@ -1,23 +1,39 @@
 import { sleep } from "k6";
 import { browser } from "k6/browser";
+import { Counter, Trend } from "k6/metrics";
 
 const FRONTEND_URL = __ENV.FRONTEND_URL || "http://localhost:5173";
-const RUM_DURATION = __ENV.RUM_BROWSER_DURATION || "3m";
-const RUM_VUS = Number(__ENV.RUM_BROWSER_VUS || 5);
-const RUM_ANONYMOUS_RATE = Number(__ENV.RUM_BROWSER_ANONYMOUS_RATE || 0);
-const RUM_STEPS_MIN = Number(__ENV.RUM_BROWSER_STEPS_MIN || 10);
-const RUM_STEPS_MAX = Number(__ENV.RUM_BROWSER_STEPS_MAX || 24);
-const RUM_IDLE_MIN_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MIN_SECONDS || 45);
-const RUM_IDLE_MAX_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MAX_SECONDS || 180);
+const RUM_DURATION = __ENV.RUM_BROWSER_DURATION || "20m";
+const RUM_VUS = clampNumber(Number(__ENV.RUM_BROWSER_VUS || 4), 1, 6);
+const RUM_ANONYMOUS_RATE = clampNumber(Number(__ENV.RUM_BROWSER_ANONYMOUS_RATE || 0), 0, 1);
+const RUM_STEPS_MIN = clampNumber(Number(__ENV.RUM_BROWSER_STEPS_MIN || 12), 1, 120);
+const RUM_STEPS_MAX = clampNumber(Number(__ENV.RUM_BROWSER_STEPS_MAX || 28), RUM_STEPS_MIN, 160);
+const RUM_MIN_ACTIONS = clampNumber(Number(__ENV.RUM_BROWSER_MIN_ACTIONS || 10), 1, 80);
+const RUM_MIN_SESSION_SECONDS = clampNumber(Number(__ENV.RUM_BROWSER_MIN_SESSION_SECONDS || 180), 30, 1800);
+const RUM_IDLE_MIN_SECONDS = clampNumber(Number(__ENV.RUM_BROWSER_IDLE_MIN_SECONDS || 45), 1, 1800);
+const RUM_IDLE_MAX_SECONDS = clampNumber(Number(__ENV.RUM_BROWSER_IDLE_MAX_SECONDS || 180), RUM_IDLE_MIN_SECONDS, 2400);
 const RUM_ROLE_WEIGHTS_RAW = __ENV.RUM_BROWSER_ROLE_WEIGHTS || "patient:60,doctor:20,receptionist:15,admin:5";
+const RUM_USER_AGENT =
+  __ENV.RUM_BROWSER_USER_AGENT ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
 const APP_PATHS = ["/", "/journeys", "/appointments", "/exams", "/operations", "/patients"];
 const AUTH_STORAGE_KEY = "hospital_demo_auth";
+
 const ROLE_LABEL = {
   patient: "Paciente",
   doctor: "Medico",
   receptionist: "Recepcao",
   admin: "Operacoes",
 };
+
+const loginSuccess = new Counter("rum_login_success");
+const loginFailure = new Counter("rum_login_failure");
+const identifySuccess = new Counter("rum_identify_success");
+const identifyFailure = new Counter("rum_identify_failure");
+const iterationErrors = new Counter("rum_iteration_errors");
+const actionsPerIteration = new Trend("rum_actions_per_iteration");
+const durationPerIteration = new Trend("rum_iteration_duration_seconds");
 
 export const options = {
   scenarios: {
@@ -34,12 +50,15 @@ export const options = {
   },
 };
 
-function pickRandom(items) {
-  return items[Math.floor(Math.random() * items.length)];
+function clampNumber(value, min, max) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.max(min, Math.min(max, value));
 }
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+function pickRandom(items) {
+  return items[Math.floor(Math.random() * items.length)];
 }
 
 function randomInt(min, max) {
@@ -53,11 +72,12 @@ function randomInt(min, max) {
 
 function parseRoleWeights(rawValue) {
   const defaults = [
-    { role: "patient", weight: 55 },
+    { role: "patient", weight: 60 },
     { role: "doctor", weight: 20 },
-    { role: "receptionist", weight: 20 },
+    { role: "receptionist", weight: 15 },
     { role: "admin", weight: 5 },
   ];
+
   const chunks = String(rawValue || "")
     .split(",")
     .map((item) => item.trim())
@@ -72,7 +92,7 @@ function parseRoleWeights(rawValue) {
     const [roleRaw, weightRaw] = chunk.split(":");
     const role = String(roleRaw || "").trim();
     const weight = Number(String(weightRaw || "").trim());
-    if (!["patient", "doctor", "receptionist", "admin"].includes(role)) {
+    if (!Object.prototype.hasOwnProperty.call(ROLE_LABEL, role)) {
       continue;
     }
     if (!Number.isFinite(weight) || weight <= 0) {
@@ -81,11 +101,7 @@ function parseRoleWeights(rawValue) {
     parsed.push({ role, weight });
   }
 
-  if (!parsed.length) {
-    return defaults;
-  }
-
-  return parsed;
+  return parsed.length ? parsed : defaults;
 }
 
 function pickWeightedRole(weights) {
@@ -122,7 +138,7 @@ async function clickIfVisible(page, selectors) {
 async function waitForDemoUsers(page, timeoutMs = 12000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const count = await page.locator(".demo-user-button").count();
+    const count = await page.locator(".demo-user-button").count().catch(() => 0);
     if (count > 0) {
       return count;
     }
@@ -155,11 +171,13 @@ async function readUserTagFromStorage(page) {
       if (!raw) {
         return "";
       }
+
       const auth = JSON.parse(raw);
       const user = auth?.user || null;
       if (!user) {
         return "";
       }
+
       const role = String(user.role || "usuario").trim() || "usuario";
       const identity = String(user.full_name || user.name || user.email || user.id || "desconhecido").trim();
       return identity ? `${role}:${identity}` : "";
@@ -167,7 +185,7 @@ async function readUserTagFromStorage(page) {
     .catch(() => "");
 }
 
-async function ensureRumIdentify(page, userTag, timeoutMs = 12000) {
+async function ensureRumIdentify(page, userTag, timeoutMs = 10000) {
   if (!userTag) {
     return false;
   }
@@ -239,19 +257,16 @@ async function tryDemoLogin(page, preferredRole) {
     "button:has-text('Entrar com demo')",
   ]);
 
-  await page.waitForTimeout(450 + Math.random() * 900);
-  let usersCount = await waitForDemoUsers(page, 16000);
+  await page.waitForTimeout(500 + Math.random() * 900);
+
+  let usersCount = await waitForDemoUsers(page, 15000);
   if (!usersCount) {
-    await clickIfVisible(page, [
-      "button:has-text('Acesso demonstracao')",
-      "button:has-text('Login demo')",
-      "button:has-text('Entrar demo')",
-      "button:has-text('Entrar com demo')",
-    ]);
+    await clickIfVisible(page, ["button:has-text('Acesso demonstracao')"]);
     usersCount = await waitForDemoUsers(page, 8000);
   }
+
   if (!usersCount) {
-    return false;
+    return { loggedIn: false, userTag: "", identifyOk: false };
   }
 
   let clicked = false;
@@ -266,16 +281,14 @@ async function tryDemoLogin(page, preferredRole) {
     await targetUser.click().catch(() => {});
   }
 
-  if (!(await waitForAuthenticatedState(page, 20000))) {
-    return false;
+  const loggedIn = await waitForAuthenticatedState(page, 22000);
+  if (!loggedIn) {
+    return { loggedIn: false, userTag: "", identifyOk: false };
   }
 
   const userTag = await readUserTagFromStorage(page);
-  if (userTag) {
-    await ensureRumIdentify(page, userTag, 8000);
-  }
-
-  return true;
+  const identifyOk = await ensureRumIdentify(page, userTag, 9000);
+  return { loggedIn: true, userTag, identifyOk };
 }
 
 async function apiFallbackDemoLogin(page, preferredRole) {
@@ -317,6 +330,7 @@ async function apiFallbackDemoLogin(page, preferredRole) {
           user: payload.user,
         }),
       );
+
       const roleSafe = String(payload.user.role || "usuario").trim() || "usuario";
       const identitySafe = String(
         payload.user.full_name || payload.user.name || payload.user.email || payload.user.id || "desconhecido",
@@ -330,7 +344,7 @@ async function apiFallbackDemoLogin(page, preferredRole) {
     .catch(() => ({ ok: false, userTag: "" }));
 
   if (!loginResult?.ok) {
-    return false;
+    return { loggedIn: false, userTag: "", identifyOk: false };
   }
 
   await page.goto(`${FRONTEND_URL}/`, {
@@ -338,120 +352,195 @@ async function apiFallbackDemoLogin(page, preferredRole) {
     timeout: 60000,
   });
 
-  if (!(await waitForAuthenticatedState(page, 15000))) {
-    return false;
+  const loggedIn = await waitForAuthenticatedState(page, 16000);
+  if (!loggedIn) {
+    return { loggedIn: false, userTag: "", identifyOk: false };
   }
 
-  if (loginResult?.userTag) {
-    await ensureRumIdentify(page, loginResult.userTag, 8000);
-  }
-
-  return true;
+  const identifyOk = await ensureRumIdentify(page, loginResult.userTag, 9000);
+  return { loggedIn: true, userTag: loginResult.userTag, identifyOk };
 }
 
-async function doLoggedInStep(page) {
-  const menuCount = await page.locator(".menu-link").count().catch(() => 0);
-  if (menuCount > 0) {
-    const target = randomInt(0, menuCount - 1);
-    await page.locator(".menu-link").nth(target).click().catch(() => {});
-    await page.waitForTimeout(600 + Math.random() * 1800);
-  } else {
+async function doLoggedInAction(page) {
+  const strategy = Math.random();
+
+  if (strategy < 0.45) {
+    const menuCount = await page.locator(".menu-link").count().catch(() => 0);
+    if (menuCount > 0) {
+      const target = randomInt(0, menuCount - 1);
+      await page.locator(".menu-link").nth(target).click({ timeout: 10000 }).catch(() => {});
+      await page.waitForTimeout(700 + Math.random() * 1600);
+      return true;
+    }
+  }
+
+  if (strategy < 0.8) {
     const path = pickRandom(APP_PATHS);
     await page.goto(`${FRONTEND_URL}${path}`, {
       waitUntil: "domcontentloaded",
       timeout: 45000,
     });
-    await page.waitForTimeout(900 + Math.random() * 2600);
+    await page.waitForTimeout(900 + Math.random() * 1800);
+    return true;
   }
 
-  if (Math.random() < 0.45) {
-    await clickIfVisible(page, [
-      "button:has-text('Atualizar')",
-      "button:has-text('Buscar')",
-      "button:has-text('Filtrar')",
-      "button:has-text('Salvar')",
-      "button:has-text('Criar')",
-      ".panel button",
-      ".card button",
-    ]);
-    await page.waitForTimeout(350 + Math.random() * 1000);
-  }
+  const clicked = await clickIfVisible(page, [
+    "button:has-text('Atualizar')",
+    "button:has-text('Buscar')",
+    "button:has-text('Filtrar')",
+    "button:has-text('Salvar')",
+    "button:has-text('Criar')",
+    ".panel button",
+    ".card button",
+  ]);
 
-  if (Math.random() < 0.6) {
+  if (Math.random() < 0.75) {
     await page.evaluate(() => window.scrollTo(0, Math.floor(Math.random() * document.body.scrollHeight))).catch(() => {});
-    await page.waitForTimeout(250 + Math.random() * 700);
   }
+
+  await page.waitForTimeout(450 + Math.random() * 1200);
+  return clicked || true;
 }
 
-async function doAnonymousStep(page) {
+async function doAnonymousAction(page) {
   await page.goto(`${FRONTEND_URL}/login`, {
     waitUntil: "domcontentloaded",
     timeout: 45000,
   });
-  await page.waitForTimeout(500 + Math.random() * 1200);
 
+  await page.waitForTimeout(450 + Math.random() * 1000);
   await clickIfVisible(page, [
     "button:has-text('Entrar com e-mail')",
     "button:has-text('Cadastrar paciente')",
     "button:has-text('Acesso demonstracao')",
   ]);
 
-  if (Math.random() < 0.65) {
-    const fake = randomInt(1000, 9999);
-    await page.locator(".auth-form-credentials input[type='email']").first().fill(`visitante.${fake}@hospital.local`).catch(() => {});
-    await page.locator(".auth-form-credentials input[type='password']").first().fill("123456").catch(() => {});
-    await clickIfVisible(page, ["form.auth-form-credentials button:has-text('Entrar')"]);
-  }
+  await page.waitForTimeout(500 + Math.random() * 1000);
+  return true;
+}
 
-  await page.waitForTimeout(650 + Math.random() * 1800);
+async function openContextAndPage() {
+  const viewport = {
+    width: randomInt(1280, 1920),
+    height: randomInt(720, 1080),
+  };
+
+  try {
+    const context = await browser.newContext({
+      userAgent: RUM_USER_AGENT,
+      viewport,
+    });
+    const page = await context.newPage();
+    return { context, page };
+  } catch {
+    const page = await browser.newPage();
+    return { context: null, page };
+  }
 }
 
 export default async function () {
-  const page = await browser.newPage();
+  const startedAt = Date.now();
+  const preferredRole = pickWeightedRole(RUM_ROLE_WEIGHTS);
+  const shouldStayAnonymous = Math.random() < RUM_ANONYMOUS_RATE;
+
+  let context = null;
+  let page = null;
+  let loggedIn = false;
+  let identifyOk = false;
+  let userTag = "";
+  let actionCount = 0;
 
   try {
+    const opened = await openContextAndPage();
+    context = opened.context;
+    page = opened.page;
+
     await page.goto(`${FRONTEND_URL}/login`, {
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
-    await page.waitForTimeout(500 + Math.random() * 1200);
-
-    const shouldStayAnonymous = Math.random() < clamp(RUM_ANONYMOUS_RATE, 0, 1);
-    const preferredRole = pickWeightedRole(RUM_ROLE_WEIGHTS);
-    let isLoggedIn = false;
+    await page.waitForTimeout(600 + Math.random() * 1100);
 
     if (!shouldStayAnonymous) {
-      isLoggedIn = await tryDemoLogin(page, preferredRole);
-      if (!isLoggedIn) {
-        isLoggedIn = await apiFallbackDemoLogin(page, preferredRole);
-      }
-      if (!isLoggedIn) {
-        await page.goto(`${FRONTEND_URL}/login`, {
-          waitUntil: "domcontentloaded",
-          timeout: 60000,
-        });
-        await page.waitForTimeout(400 + Math.random() * 900);
-        isLoggedIn = await tryDemoLogin(page, preferredRole);
-      }
-    }
+      for (let attempt = 0; attempt < 3 && !loggedIn; attempt += 1) {
+        let loginState = await tryDemoLogin(page, preferredRole);
+        if (!loginState.loggedIn) {
+          loginState = await apiFallbackDemoLogin(page, preferredRole);
+        }
 
-    const hops = randomInt(clamp(RUM_STEPS_MIN, 10, 60), clamp(RUM_STEPS_MAX, 10, 90));
-    for (let i = 0; i < hops; i += 1) {
-      if (isLoggedIn) {
-        await doLoggedInStep(page);
+        loggedIn = loginState.loggedIn;
+        identifyOk = loginState.identifyOk;
+        userTag = loginState.userTag;
+
+        if (!loggedIn) {
+          await page.goto(`${FRONTEND_URL}/login`, {
+            waitUntil: "domcontentloaded",
+            timeout: 60000,
+          });
+          await page.waitForTimeout(400 + Math.random() * 900);
+        }
+      }
+
+      if (loggedIn) {
+        loginSuccess.add(1);
       } else {
-        await doAnonymousStep(page);
+        loginFailure.add(1);
+      }
+
+      if (loggedIn && !identifyOk) {
+        identifyOk = await ensureRumIdentify(page, userTag, 9000);
+      }
+
+      if (loggedIn && identifyOk) {
+        identifySuccess.add(1);
+      } else if (loggedIn) {
+        identifyFailure.add(1);
       }
     }
 
-    const idleMin = clamp(RUM_IDLE_MIN_SECONDS, 1, 900);
-    const idleMax = clamp(RUM_IDLE_MAX_SECONDS, idleMin, 1200);
-    const idleSeconds = randomInt(idleMin, idleMax);
+    const targetActions = Math.max(RUM_MIN_ACTIONS, randomInt(RUM_STEPS_MIN, RUM_STEPS_MAX));
+    let attemptsLeft = targetActions * 4;
+
+    while (actionCount < targetActions && attemptsLeft > 0) {
+      attemptsLeft -= 1;
+      if (loggedIn) {
+        await doLoggedInAction(page);
+      } else {
+        await doAnonymousAction(page);
+      }
+      actionCount += 1;
+
+      if (loggedIn && userTag) {
+        await ensureRumIdentify(page, userTag, 1200);
+      }
+    }
+
+    actionsPerIteration.add(actionCount);
+
+    const elapsedSeconds = (Date.now() - startedAt) / 1000;
+    if (elapsedSeconds < RUM_MIN_SESSION_SECONDS) {
+      await page.waitForTimeout((RUM_MIN_SESSION_SECONDS - elapsedSeconds) * 1000);
+    }
+
+    const idleSeconds = randomInt(RUM_IDLE_MIN_SECONDS, RUM_IDLE_MAX_SECONDS);
     await page.waitForTimeout(idleSeconds * 1000);
-  } catch (_error) {
-    // Erros sao esperados em testes de estresse.
+
+    const totalSeconds = (Date.now() - startedAt) / 1000;
+    durationPerIteration.add(totalSeconds);
+
+    console.log(
+      `[rum-iter] role=${preferredRole} loggedIn=${loggedIn} identify=${identifyOk} actions=${actionCount} durationSec=${Math.round(totalSeconds)}`,
+    );
+  } catch (error) {
+    iterationErrors.add(1);
+    console.error(`[rum-iter-error] role=${preferredRole} message=${String(error?.message || error)}`);
   } finally {
-    await page.close();
+    if (page) {
+      await page.close().catch(() => {});
+    }
+    if (context) {
+      await context.close().catch(() => {});
+    }
   }
 
   sleep(Math.random());
