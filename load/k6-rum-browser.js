@@ -9,8 +9,15 @@ const RUM_STEPS_MIN = Number(__ENV.RUM_BROWSER_STEPS_MIN || 8);
 const RUM_STEPS_MAX = Number(__ENV.RUM_BROWSER_STEPS_MAX || 20);
 const RUM_IDLE_MIN_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MIN_SECONDS || 45);
 const RUM_IDLE_MAX_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MAX_SECONDS || 180);
+const RUM_ROLE_WEIGHTS_RAW = __ENV.RUM_BROWSER_ROLE_WEIGHTS || "patient:55,doctor:20,receptionist:20,admin:5";
 const APP_PATHS = ["/", "/journeys", "/appointments", "/exams", "/operations", "/patients"];
 const AUTH_STORAGE_KEY = "hospital_demo_auth";
+const ROLE_LABEL = {
+  patient: "Paciente",
+  doctor: "Medico",
+  receptionist: "Recepcao",
+  admin: "Operacoes",
+};
 
 export const options = {
   scenarios: {
@@ -43,6 +50,63 @@ function randomInt(min, max) {
   }
   return Math.floor(Math.random() * (safeMax - safeMin + 1)) + safeMin;
 }
+
+function parseRoleWeights(rawValue) {
+  const defaults = [
+    { role: "patient", weight: 55 },
+    { role: "doctor", weight: 20 },
+    { role: "receptionist", weight: 20 },
+    { role: "admin", weight: 5 },
+  ];
+  const chunks = String(rawValue || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (!chunks.length) {
+    return defaults;
+  }
+
+  const parsed = [];
+  for (const chunk of chunks) {
+    const [roleRaw, weightRaw] = chunk.split(":");
+    const role = String(roleRaw || "").trim();
+    const weight = Number(String(weightRaw || "").trim());
+    if (!["patient", "doctor", "receptionist", "admin"].includes(role)) {
+      continue;
+    }
+    if (!Number.isFinite(weight) || weight <= 0) {
+      continue;
+    }
+    parsed.push({ role, weight });
+  }
+
+  if (!parsed.length) {
+    return defaults;
+  }
+
+  return parsed;
+}
+
+function pickWeightedRole(weights) {
+  const safeWeights = Array.isArray(weights) && weights.length ? weights : parseRoleWeights("");
+  const total = safeWeights.reduce((acc, item) => acc + Number(item.weight || 0), 0);
+  if (total <= 0) {
+    return "patient";
+  }
+
+  let cursor = Math.random() * total;
+  for (const item of safeWeights) {
+    cursor -= Number(item.weight || 0);
+    if (cursor <= 0) {
+      return item.role;
+    }
+  }
+
+  return safeWeights[safeWeights.length - 1].role;
+}
+
+const RUM_ROLE_WEIGHTS = parseRoleWeights(RUM_ROLE_WEIGHTS_RAW);
 
 async function clickIfVisible(page, selectors) {
   for (const selector of selectors) {
@@ -84,7 +148,44 @@ async function waitForAuthenticatedState(page, timeoutMs = 20000) {
   return false;
 }
 
-async function tryDemoLogin(page) {
+async function clickDemoUserByRole(page, role) {
+  const expectedLabel = ROLE_LABEL[String(role || "").trim()] || "";
+  if (!expectedLabel) {
+    return false;
+  }
+
+  return page
+    .evaluate((label) => {
+      const cards = Array.from(document.querySelectorAll(".demo-card"));
+      const targetCard = cards.find((card) => {
+        const title = String(card.querySelector("h2")?.textContent || "")
+          .trim()
+          .toLowerCase();
+        return title.includes(label.toLowerCase());
+      });
+
+      if (!targetCard) {
+        return false;
+      }
+
+      const buttons = Array.from(targetCard.querySelectorAll(".demo-user-button"));
+      if (!buttons.length) {
+        return false;
+      }
+
+      const chosen = buttons[Math.floor(Math.random() * buttons.length)];
+      if (!chosen) {
+        return false;
+      }
+
+      chosen.scrollIntoView({ block: "center" });
+      chosen.click();
+      return true;
+    }, expectedLabel)
+    .catch(() => false);
+}
+
+async function tryDemoLogin(page, preferredRole) {
   await clickIfVisible(page, [
     "button:has-text('Acesso demonstracao')",
     "button:has-text('Login demo')",
@@ -107,19 +208,24 @@ async function tryDemoLogin(page) {
     return false;
   }
 
-  const target = randomInt(0, Math.min(usersCount - 1, 23));
-  const targetUser = page.locator(".demo-user-button").nth(target);
-  await targetUser.scrollIntoViewIfNeeded().catch(() => {});
-  await targetUser.click().catch(() => {});
+  let clicked = false;
+  if (preferredRole) {
+    clicked = await clickDemoUserByRole(page, preferredRole);
+  }
+
+  if (!clicked) {
+    const target = randomInt(0, Math.min(usersCount - 1, 23));
+    const targetUser = page.locator(".demo-user-button").nth(target);
+    await targetUser.scrollIntoViewIfNeeded().catch(() => {});
+    await targetUser.click().catch(() => {});
+  }
 
   return waitForAuthenticatedState(page, 20000);
 }
 
-async function apiFallbackDemoLogin(page) {
+async function apiFallbackDemoLogin(page, preferredRole) {
   const logged = await page
-    .evaluate(async (storageKey) => {
-      const roles = ["patient", "doctor", "receptionist", "admin"];
-      const role = roles[Math.floor(Math.random() * roles.length)];
+    .evaluate(async (storageKey, role) => {
       const usersResponse = await fetch(`/api/auth/demo-users?role=${role}&limit=24`).catch(() => null);
       if (!usersResponse || !usersResponse.ok) {
         return false;
@@ -157,7 +263,7 @@ async function apiFallbackDemoLogin(page) {
         }),
       );
       return true;
-    }, AUTH_STORAGE_KEY)
+    }, AUTH_STORAGE_KEY, preferredRole || "patient")
     .catch(() => false);
 
   if (!logged) {
@@ -172,6 +278,63 @@ async function apiFallbackDemoLogin(page) {
   return waitForAuthenticatedState(page, 15000);
 }
 
+async function doLoggedInStep(page) {
+  const menuCount = await page.locator(".menu-link").count().catch(() => 0);
+  if (menuCount > 0) {
+    const target = randomInt(0, menuCount - 1);
+    await page.locator(".menu-link").nth(target).click().catch(() => {});
+    await page.waitForTimeout(600 + Math.random() * 1800);
+  } else {
+    const path = pickRandom(APP_PATHS);
+    await page.goto(`${FRONTEND_URL}${path}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 45000,
+    });
+    await page.waitForTimeout(900 + Math.random() * 2600);
+  }
+
+  if (Math.random() < 0.45) {
+    await clickIfVisible(page, [
+      "button:has-text('Atualizar')",
+      "button:has-text('Buscar')",
+      "button:has-text('Filtrar')",
+      "button:has-text('Salvar')",
+      "button:has-text('Criar')",
+      ".panel button",
+      ".card button",
+    ]);
+    await page.waitForTimeout(350 + Math.random() * 1000);
+  }
+
+  if (Math.random() < 0.6) {
+    await page.evaluate(() => window.scrollTo(0, Math.floor(Math.random() * document.body.scrollHeight))).catch(() => {});
+    await page.waitForTimeout(250 + Math.random() * 700);
+  }
+}
+
+async function doAnonymousStep(page) {
+  await page.goto(`${FRONTEND_URL}/login`, {
+    waitUntil: "domcontentloaded",
+    timeout: 45000,
+  });
+  await page.waitForTimeout(500 + Math.random() * 1200);
+
+  await clickIfVisible(page, [
+    "button:has-text('Entrar com e-mail')",
+    "button:has-text('Cadastrar paciente')",
+    "button:has-text('Acesso demonstracao')",
+  ]);
+
+  if (Math.random() < 0.65) {
+    const fake = randomInt(1000, 9999);
+    await page.locator(".auth-form-credentials input[type='email']").first().fill(`visitante.${fake}@hospital.local`).catch(() => {});
+    await page.locator(".auth-form-credentials input[type='password']").first().fill("123456").catch(() => {});
+    await clickIfVisible(page, ["form.auth-form-credentials button:has-text('Entrar')"]);
+  }
+
+  await page.waitForTimeout(650 + Math.random() * 1800);
+}
+
 export default async function () {
   const page = await browser.newPage();
 
@@ -183,12 +346,13 @@ export default async function () {
     await page.waitForTimeout(500 + Math.random() * 1200);
 
     const shouldStayAnonymous = Math.random() < clamp(RUM_ANONYMOUS_RATE, 0, 1);
+    const preferredRole = pickWeightedRole(RUM_ROLE_WEIGHTS);
     let isLoggedIn = false;
 
     if (!shouldStayAnonymous) {
-      isLoggedIn = await tryDemoLogin(page);
+      isLoggedIn = await tryDemoLogin(page, preferredRole);
       if (!isLoggedIn) {
-        isLoggedIn = await apiFallbackDemoLogin(page);
+        isLoggedIn = await apiFallbackDemoLogin(page, preferredRole);
       }
       if (!isLoggedIn) {
         await page.goto(`${FRONTEND_URL}/login`, {
@@ -196,18 +360,17 @@ export default async function () {
           timeout: 60000,
         });
         await page.waitForTimeout(400 + Math.random() * 900);
-        isLoggedIn = await tryDemoLogin(page);
+        isLoggedIn = await tryDemoLogin(page, preferredRole);
       }
     }
 
     const hops = randomInt(clamp(RUM_STEPS_MIN, 1, 50), clamp(RUM_STEPS_MAX, 1, 80));
     for (let i = 0; i < hops; i += 1) {
-      const path = isLoggedIn ? pickRandom(APP_PATHS) : "/login";
-      await page.goto(`${FRONTEND_URL}${path}`, {
-        waitUntil: "domcontentloaded",
-        timeout: 45000,
-      });
-      await page.waitForTimeout(900 + Math.random() * 2600);
+      if (isLoggedIn) {
+        await doLoggedInStep(page);
+      } else {
+        await doAnonymousStep(page);
+      }
     }
 
     const idleMin = clamp(RUM_IDLE_MIN_SECONDS, 1, 900);
