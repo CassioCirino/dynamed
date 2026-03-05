@@ -151,7 +151,10 @@ async function stopContainerByName(containerName) {
   try {
     await container.stop({ t: 10 });
   } catch (error) {
-    if (!String(error?.message || "").toLowerCase().includes("is not running")) {
+    const message = String(error?.message || "").toLowerCase();
+    const statusCode = Number(error?.statusCode || error?.status || 0);
+    const alreadyStopped = statusCode === 304 || message.includes("already stopped") || message.includes("is not running");
+    if (!alreadyStopped) {
       throw error;
     }
   }
@@ -340,7 +343,9 @@ async function recreateRumBrowserContainer(envOverrides = {}) {
     await container.stop({ t: 5 });
   } catch (error) {
     const message = getErrorMessage(error);
-    if (!message.includes("is not running") && !isContainerNotFoundError(error)) {
+    const statusCode = Number(error?.statusCode || error?.status || 0);
+    const alreadyStopped = statusCode === 304 || message.includes("already stopped") || message.includes("is not running");
+    if (!alreadyStopped && !isContainerNotFoundError(error)) {
       throw error;
     }
   }
@@ -736,7 +741,10 @@ async function stopRumBrowserScenario() {
   try {
     await stopContainerByName(RUM_BROWSER_CONTAINER);
   } catch (error) {
-    if (isContainerNotFoundError(error)) {
+    const message = getErrorMessage(error);
+    const statusCode = Number(error?.statusCode || error?.status || 0);
+    const alreadyStopped = statusCode === 304 || message.includes("already stopped") || message.includes("is not running");
+    if (isContainerNotFoundError(error) || alreadyStopped) {
       return;
     }
     throw error;
