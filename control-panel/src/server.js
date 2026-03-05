@@ -62,6 +62,10 @@ const rumScheduleState = {
   startTimeout: null,
   stopTimeout: null,
 };
+const presetAuxState = {
+  dbCanaryInterval: null,
+  dbCanaryStopTimeout: null,
+};
 
 app.use(express.json({ limit: "128kb" }));
 app.use(express.static(path.join(__dirname, "..", "public")));
@@ -254,6 +258,38 @@ function clearRumScheduleTimers() {
     clearTimeout(rumScheduleState.stopTimeout);
     rumScheduleState.stopTimeout = null;
   }
+}
+
+function stopDbCanary() {
+  if (presetAuxState.dbCanaryInterval) {
+    clearInterval(presetAuxState.dbCanaryInterval);
+    presetAuxState.dbCanaryInterval = null;
+  }
+  if (presetAuxState.dbCanaryStopTimeout) {
+    clearTimeout(presetAuxState.dbCanaryStopTimeout);
+    presetAuxState.dbCanaryStopTimeout = null;
+  }
+}
+
+function startDbCanary(durationSeconds, intervalMs = 1000) {
+  stopDbCanary();
+  const safeIntervalMs = Math.max(300, Math.min(5000, Number(intervalMs || 1000)));
+  const safeDurationMs = Math.max(30000, Number(durationSeconds || 60) * 1000);
+  const baseUrl = BACKEND_INTERNAL_URL;
+
+  presetAuxState.dbCanaryInterval = setInterval(async () => {
+    try {
+      await fetchWithTimeout(`${baseUrl}/health/ready`, { method: "GET" }, 4000);
+    } catch (_error) {
+      // no-op: o objetivo e gerar evidencia de disponibilidade/indisponibilidade no backend
+    }
+  }, safeIntervalMs);
+  presetAuxState.dbCanaryInterval.unref();
+
+  presetAuxState.dbCanaryStopTimeout = setTimeout(() => {
+    stopDbCanary();
+  }, safeDurationMs + 2000);
+  presetAuxState.dbCanaryStopTimeout.unref();
 }
 
 function compactObject(value) {
@@ -1222,6 +1258,7 @@ async function stopAllScenarios() {
   } catch (_error) {
     // no-op
   }
+  stopDbCanary();
   try {
     await disableSimulationJobScheduler();
   } catch (_error) {
@@ -1374,7 +1411,7 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
   const sessions = anomalyMode ? 260 : 180;
   const requestPacingMs = anomalyMode ? 750 : 950;
   const jitterMs = anomalyMode ? 250 : 350;
-  const rumSessionsPerMinute = anomalyMode ? 26 : 16;
+  const rumSessionsPerMinute = anomalyMode ? 4 : 2;
 
   await stopAllScenarios();
   await ensureCoreServicesHealthy();
@@ -1395,6 +1432,7 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
     containerName: POSTGRES_CONTAINER,
     durationSeconds: safeDuration,
   });
+  startDbCanary(safeDuration, anomalyMode ? 500 : 900);
 
   setTimedScenarioState({
     id: PRESET_ROOT_DB_SCENARIO_ID,
@@ -1408,9 +1446,11 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
       sessions,
       rumSessionsPerMinute: rumTraffic.rumSessionsPerMinute,
       rumVus: rumTraffic.rumVus,
+      dbCanaryIntervalMs: anomalyMode ? 500 : 900,
       dbOutageSeconds: safeDuration,
     },
-    note: "Somente o banco fica indisponivel; frontend e backend seguem com carga para evidenciar causa raiz no PostgreSQL.",
+    note:
+      "Somente o banco fica indisponivel; backend recebe carga alta e canary de readiness para reforcar evidencia de causa raiz no PostgreSQL.",
   });
 }
 
