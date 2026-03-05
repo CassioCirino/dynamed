@@ -1,5 +1,6 @@
 import { sleep } from "k6";
 import { browser } from "k6/browser";
+import http from "k6/http";
 import { Counter, Trend } from "k6/metrics";
 
 const FRONTEND_URL = __ENV.FRONTEND_URL || "http://localhost:5173";
@@ -492,6 +493,131 @@ async function apiFallbackDemoLogin(page, preferredRole) {
   return { loggedIn: true, userTag: loginResult.userTag, identifyOk };
 }
 
+function buildUserTagFromPayload(user) {
+  if (!user) {
+    return "";
+  }
+  const role = String(user.role || "usuario").trim() || "usuario";
+  const identity = String(user.full_name || user.fullName || user.name || user.email || user.id || "desconhecido").trim();
+  return identity ? `${role}:${identity}` : "";
+}
+
+function safeJson(response) {
+  try {
+    return JSON.parse(String(response?.body || "{}"));
+  } catch {
+    return {};
+  }
+}
+
+function loginViaBackendApi(role) {
+  const usersRes = http.get(`${FRONTEND_URL}/api/auth/demo-users?role=${encodeURIComponent(role)}&limit=24`, {
+    timeout: "30s",
+  });
+  if (!usersRes || usersRes.status !== 200) {
+    return { ok: false, reason: `demo-users-status-${usersRes?.status || "no-response"}` };
+  }
+
+  const usersBody = safeJson(usersRes);
+  const users = Array.isArray(usersBody?.users) ? usersBody.users : [];
+  if (!users.length) {
+    return { ok: false, reason: "demo-users-empty" };
+  }
+
+  const picked = users[Math.floor(Math.random() * users.length)];
+  if (!picked?.id) {
+    return { ok: false, reason: "demo-user-without-id" };
+  }
+
+  const loginRes = http.post(`${FRONTEND_URL}/api/auth/demo-login`, JSON.stringify({ userId: picked.id }), {
+    headers: {
+      "Content-Type": "application/json",
+    },
+    timeout: "30s",
+  });
+  if (!loginRes || loginRes.status !== 200) {
+    return { ok: false, reason: `demo-login-status-${loginRes?.status || "no-response"}` };
+  }
+
+  const loginBody = safeJson(loginRes);
+  if (!loginBody?.token || !loginBody?.user) {
+    return { ok: false, reason: "demo-login-invalid-payload" };
+  }
+
+  return {
+    ok: true,
+    auth: {
+      token: loginBody.token,
+      user: loginBody.user,
+    },
+    userTag: buildUserTagFromPayload(loginBody.user),
+  };
+}
+
+async function applyAuthIntoBrowserStorage(page, authPayload) {
+  if (!authPayload?.token || !authPayload?.user) {
+    return false;
+  }
+  return page
+    .evaluate(
+      ({ storageKey, auth }) => {
+        localStorage.setItem(storageKey, JSON.stringify(auth));
+        return true;
+      },
+      {
+        storageKey: AUTH_STORAGE_KEY,
+        auth: authPayload,
+      },
+    )
+    .catch(() => false);
+}
+
+async function robustDemoLogin(page, preferredRole) {
+  const apiLogin = loginViaBackendApi(preferredRole || "patient");
+  if (apiLogin.ok) {
+    const applied = await applyAuthIntoBrowserStorage(page, apiLogin.auth);
+    if (applied) {
+      await page.goto(`${FRONTEND_URL}/`, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      });
+      const loggedIn = await waitForAuthenticatedState(page, 20000);
+      if (loggedIn) {
+        const identifyOk = await ensureRumIdentify(page, apiLogin.userTag, 9000);
+        return {
+          loggedIn: true,
+          identifyOk,
+          userTag: apiLogin.userTag,
+          source: "backend-api",
+        };
+      }
+      return {
+        loggedIn: false,
+        identifyOk: false,
+        userTag: "",
+        source: "backend-api-not-authenticated",
+      };
+    }
+  }
+
+  let uiLogin = await apiFallbackDemoLogin(page, preferredRole);
+  if (uiLogin.loggedIn) {
+    return { ...uiLogin, source: "browser-fetch" };
+  }
+
+  uiLogin = await tryDemoLogin(page, preferredRole);
+  if (uiLogin.loggedIn) {
+    return { ...uiLogin, source: "ui-demo-button" };
+  }
+
+  return {
+    loggedIn: false,
+    identifyOk: false,
+    userTag: "",
+    source: `failed:${apiLogin.reason || "unknown"}`,
+  };
+}
+
 async function doLoggedInAction(page) {
   let performed = 0;
 
@@ -649,14 +775,15 @@ export default async function () {
 
     if (!shouldStayAnonymous) {
       for (let attempt = 0; attempt < 3 && !loggedIn; attempt += 1) {
-        let loginState = await apiFallbackDemoLogin(page, preferredRole);
-        if (!loginState.loggedIn) {
-          loginState = await tryDemoLogin(page, preferredRole);
-        }
+        const loginState = await robustDemoLogin(page, preferredRole);
 
         loggedIn = loginState.loggedIn;
         identifyOk = loginState.identifyOk;
         userTag = loginState.userTag;
+
+        console.error(
+          `[rum-login-attempt] role=${preferredRole} attempt=${attempt + 1} source=${loginState.source || "unknown"} loggedIn=${loggedIn}`,
+        );
 
         if (!loggedIn) {
           await page.goto(`${FRONTEND_URL}/login`, {
