@@ -300,6 +300,46 @@
         </section>
 
         <section class="panel">
+          <h2>Cenarios pre-configurados (Dynatrace)</h2>
+          <p class="tiny">Presets prontos para demo e gatilhos de alerta no Dynatrace.</p>
+          <div class="card-grid">
+            <article class="panel">
+              <h3>API - Erro intermitente</h3>
+              <p class="tiny">30% de falhas HTTP 500 por 5 minutos na API (exceto auth).</p>
+              <div class="btn-row">
+                <button class="btn-danger" data-preset="api-error-30-5m">Iniciar preset</button>
+              </div>
+              <p class="tiny" id="info-chaos-error-rate"></p>
+            </article>
+
+            <article class="panel">
+              <h3>API - Latencia alta</h3>
+              <p class="tiny">Atraso de 1200ms + jitter de 800ms por 5 minutos.</p>
+              <div class="btn-row">
+                <button class="btn-danger" data-preset="api-latency-1200-800-5m">Iniciar preset</button>
+              </div>
+              <p class="tiny" id="info-chaos-latency"></p>
+            </article>
+
+            <article class="panel">
+              <h3>Banco - indisponivel (5 min)</h3>
+              <p class="tiny">Derruba o PostgreSQL por 5 minutos para simular indisponibilidade real.</p>
+              <div class="btn-row">
+                <button class="btn-danger" data-preset="db-outage-5m">Iniciar preset</button>
+              </div>
+            </article>
+
+            <article class="panel">
+              <h3>Reset chaos API</h3>
+              <p class="tiny">Remove latencia/erro intermitente e volta API ao comportamento normal.</p>
+              <div class="btn-row">
+                <button class="btn-neutral" data-preset="api-chaos-reset">Resetar</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel">
           <h2>Cenarios de indisponibilidade</h2>
           <div class="card-grid">
             <article class="panel">
@@ -516,6 +556,8 @@
           setScenarioInfo("db", data.scenarios?.["db"]);
           setScenarioInfo("infra-cpu", data.scenarios?.["infra-cpu"]);
           setScenarioInfo("synthetic-load", data.scenarios?.["synthetic-load"]);
+          setScenarioInfo("chaos-error-rate", data.scenarios?.["chaos-error-rate"]);
+          setScenarioInfo("chaos-latency", data.scenarios?.["chaos-latency"]);
           setRumScenarioInfo(data.scenarios?.["rum-front"]);
           renderLoadState(data.load, data.loadError);
           refreshInfo.textContent = `Ultima atualizacao: ${new Date().toLocaleTimeString("pt-BR")}`;
@@ -579,6 +621,48 @@
             await refreshStatus();
           } catch (error) {
             showMessage("error", error.message);
+          }
+        });
+      });
+
+      async function runPreset(presetId) {
+        if (presetId === "api-error-30-5m") {
+          return apiCall("/api/scenarios/chaos/error-rate/start", {
+            percent: 30,
+            durationSeconds: 300,
+          });
+        }
+        if (presetId === "api-latency-1200-800-5m") {
+          return apiCall("/api/scenarios/chaos/latency/start", {
+            baseMs: 1200,
+            jitterMs: 800,
+            durationSeconds: 300,
+          });
+        }
+        if (presetId === "db-outage-5m") {
+          return apiCall("/api/scenarios/db/start", {
+            durationSeconds: 300,
+          });
+        }
+        if (presetId === "api-chaos-reset") {
+          return apiCall("/api/scenarios/chaos/reset", {});
+        }
+        throw new Error("Preset desconhecido.");
+      }
+
+      document.querySelectorAll("button[data-preset]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const presetId = button.dataset.preset;
+          const label = button.textContent;
+          try {
+            button.disabled = true;
+            const result = await runPreset(presetId);
+            showMessage("ok", result.message || `Preset executado: ${label}`);
+            await refreshStatus();
+          } catch (error) {
+            showMessage("error", error.message);
+          } finally {
+            button.disabled = false;
           }
         });
       });

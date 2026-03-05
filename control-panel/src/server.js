@@ -30,6 +30,8 @@ const backendAuthCache = {
 
 const LOAD_SCENARIO_ID = "synthetic-load";
 const RUM_SCENARIO_ID = "rum-front";
+const CHAOS_ERROR_RATE_SCENARIO_ID = "chaos-error-rate";
+const CHAOS_LATENCY_SCENARIO_ID = "chaos-latency";
 const ALLOWED_LOAD_PROFILES = new Set(["light", "moderate", "heavy", "extreme", "custom"]);
 const ALLOWED_LOAD_ROLES = new Set(["patient", "doctor", "receptionist", "admin"]);
 const DEFAULT_LOAD_ROLES = ["patient", "doctor", "receptionist"];
@@ -390,6 +392,33 @@ function scenarioSnapshot() {
   }
 
   return scenarios;
+}
+
+function setTimedScenarioState({ id, type, label, durationSeconds, details = {}, note = "" }) {
+  const safeDuration = Math.max(1, Number(durationSeconds || 1));
+  const endsAtMs = Date.now() + safeDuration * 1000;
+  const startedAt = new Date().toISOString();
+
+  scenarioState.set(id, {
+    id,
+    type,
+    running: true,
+    label,
+    startedAt,
+    endsAtMs,
+    details,
+    note,
+  });
+
+  setTimeout(() => {
+    const current = scenarioState.get(id);
+    if (!current) return;
+    const stillRunning = Boolean(current.running);
+    const sameWindow = Number(current.endsAtMs || 0) <= endsAtMs + 1500;
+    if (stillRunning && sameWindow) {
+      scenarioState.delete(id);
+    }
+  }, safeDuration * 1000).unref();
 }
 
 async function startOutageScenario({ id, label, containerName, durationSeconds }) {
@@ -843,6 +872,89 @@ async function stopCpuChaos() {
   return response;
 }
 
+async function startApiErrorRateChaos({ percent, durationSeconds }) {
+  const safePercent = Math.max(1, Math.min(100, Number(percent || 30)));
+  const safeDuration = Math.max(10, Math.min(3600, Number(durationSeconds || 300)));
+
+  const response = await backendRequest("/api/operations/chaos/error-rate", {
+    method: "POST",
+    requiresControlKey: true,
+    payload: {
+      percent: safePercent,
+      durationSeconds: safeDuration,
+    },
+  });
+
+  setTimedScenarioState({
+    id: CHAOS_ERROR_RATE_SCENARIO_ID,
+    type: "chaos_error_rate",
+    label: "API - Erros intermitentes",
+    durationSeconds: safeDuration,
+    details: {
+      percent: safePercent,
+      durationSeconds: safeDuration,
+    },
+    note: `Falhas HTTP 500 em ${safePercent}% das chamadas da API (exceto /api/auth).`,
+  });
+
+  return response;
+}
+
+async function startApiLatencyChaos({ baseMs, jitterMs, durationSeconds }) {
+  const safeBaseMs = Math.max(50, Math.min(15000, Number(baseMs || 1200)));
+  const safeJitterMs = Math.max(0, Math.min(15000, Number(jitterMs || 800)));
+  const safeDuration = Math.max(10, Math.min(3600, Number(durationSeconds || 300)));
+
+  const response = await backendRequest("/api/operations/chaos/latency", {
+    method: "POST",
+    requiresControlKey: true,
+    payload: {
+      baseMs: safeBaseMs,
+      jitterMs: safeJitterMs,
+      durationSeconds: safeDuration,
+    },
+  });
+
+  setTimedScenarioState({
+    id: CHAOS_LATENCY_SCENARIO_ID,
+    type: "chaos_latency",
+    label: "API - Latencia elevada",
+    durationSeconds: safeDuration,
+    details: {
+      baseMs: safeBaseMs,
+      jitterMs: safeJitterMs,
+      durationSeconds: safeDuration,
+    },
+    note: `Atraso artificial de ${safeBaseMs}ms + jitter ate ${safeJitterMs}ms por requisicao da API.`,
+  });
+
+  return response;
+}
+
+async function resetApiChaosScenarios() {
+  await backendRequest("/api/operations/chaos/error-rate", {
+    method: "POST",
+    requiresControlKey: true,
+    payload: {
+      percent: 0,
+      durationSeconds: 1,
+    },
+  });
+
+  await backendRequest("/api/operations/chaos/latency", {
+    method: "POST",
+    requiresControlKey: true,
+    payload: {
+      baseMs: 0,
+      jitterMs: 0,
+      durationSeconds: 1,
+    },
+  });
+
+  scenarioState.delete(CHAOS_ERROR_RATE_SCENARIO_ID);
+  scenarioState.delete(CHAOS_LATENCY_SCENARIO_ID);
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
@@ -1000,6 +1112,51 @@ app.post("/api/scenarios/infra-cpu/stop", requireAuth, async (_req, res, next) =
   }
 });
 
+app.post("/api/scenarios/chaos/error-rate/start", requireAuth, async (req, res, next) => {
+  try {
+    const result = await startApiErrorRateChaos({
+      percent: req.body?.percent,
+      durationSeconds: req.body?.durationSeconds,
+    });
+    return res.json({
+      message: "Cenario de erro intermitente na API iniciado.",
+      result,
+      scenarios: scenarioSnapshot(),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/scenarios/chaos/latency/start", requireAuth, async (req, res, next) => {
+  try {
+    const result = await startApiLatencyChaos({
+      baseMs: req.body?.baseMs,
+      jitterMs: req.body?.jitterMs,
+      durationSeconds: req.body?.durationSeconds,
+    });
+    return res.json({
+      message: "Cenario de latencia na API iniciado.",
+      result,
+      scenarios: scenarioSnapshot(),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/scenarios/chaos/reset", requireAuth, async (_req, res, next) => {
+  try {
+    await resetApiChaosScenarios();
+    return res.json({
+      message: "Cenarios de chaos de API resetados.",
+      scenarios: scenarioSnapshot(),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.post("/api/scenarios/load/start", requireAuth, async (req, res, next) => {
   try {
     const data = await startLoadFromControlPanel(req.body || {});
@@ -1068,6 +1225,11 @@ app.post("/api/scenarios/stop-all", requireAuth, async (_req, res, next) => {
     }
     try {
       await stopRumBrowserScenario();
+    } catch (_error) {
+      // no-op
+    }
+    try {
+      await resetApiChaosScenarios();
     } catch (_error) {
       // no-op
     }
