@@ -29,6 +29,27 @@ const dbQueryDuration = new client.Histogram({
   registers: [register],
 });
 
+const dbQueryErrorsTotal = new client.Counter({
+  name: "hospital_db_query_errors_total",
+  help: "Total de erros em queries no PostgreSQL",
+  labelNames: ["operation", "error_kind"],
+  registers: [register],
+});
+
+const dbReadinessStatus = new client.Gauge({
+  name: "hospital_db_readiness_status",
+  help: "Status do readiness do banco (1=ok, 0=falha)",
+  registers: [register],
+});
+
+const dbReadinessDuration = new client.Histogram({
+  name: "hospital_db_readiness_duration_seconds",
+  help: "Duracao da verificacao de readiness do banco",
+  labelNames: ["result"],
+  buckets: [0.001, 0.005, 0.01, 0.03, 0.06, 0.1, 0.25, 0.5, 1, 2, 5],
+  registers: [register],
+});
+
 const chaosActionsTotal = new client.Counter({
   name: "hospital_chaos_actions_total",
   help: "Total de acoes de chaos engineering",
@@ -107,6 +128,19 @@ function observeDbQuery(operation, durationSeconds) {
   dbQueryDuration.observe({ operation }, durationSeconds);
 }
 
+function observeDbQueryError(operation, errorKind) {
+  dbQueryErrorsTotal.inc({
+    operation: operation || "unknown",
+    error_kind: errorKind || "unknown",
+  });
+}
+
+function observeDbReadiness(result, durationSeconds) {
+  const normalizedResult = result === "ok" ? "ok" : "error";
+  dbReadinessStatus.set(normalizedResult === "ok" ? 1 : 0);
+  dbReadinessDuration.observe({ result: normalizedResult }, durationSeconds);
+}
+
 function recordChaos(kind, result) {
   chaosActionsTotal.inc({ kind, result });
 }
@@ -136,6 +170,8 @@ module.exports = {
   register,
   trackRequest,
   observeDbQuery,
+  observeDbQueryError,
+  observeDbReadiness,
   recordChaos,
   recordBusinessEvent,
   setChaosGauge,
