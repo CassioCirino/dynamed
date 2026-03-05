@@ -35,6 +35,7 @@ const SIMULATION_CONTROL_KEY = String(process.env.SIMULATION_CONTROL_KEY || "").
 const LOAD_STATE_CACHE_MS = Math.max(1000, Number(process.env.CONTROL_PANEL_LOAD_STATE_CACHE_MS || 15000));
 const CONTROL_PANEL_ENABLE_BACKEND_POLL =
   String(process.env.CONTROL_PANEL_ENABLE_BACKEND_POLL || "false").trim().toLowerCase() === "true";
+const BACKEND_HTTP_TIMEOUT_MS = Math.max(2000, Number(process.env.CONTROL_PANEL_BACKEND_TIMEOUT_MS || 10000));
 
 const docker = new Docker({ socketPath: "/var/run/docker.sock" });
 const scenarioState = new Map();
@@ -140,6 +141,19 @@ function clampNumber(value, min, max, fallback = null) {
 function sleep(ms) {
   const delayMs = Math.max(0, Number(ms || 0));
   return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = BACKEND_HTTP_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutRef = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs || BACKEND_HTTP_TIMEOUT_MS)));
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutRef);
+  }
 }
 
 function normalizeLoadRoles(rawRoles) {
@@ -365,15 +379,38 @@ async function startDbRootCauseChaos(durationSeconds, anomalyMode = false) {
   await stopDbRootCauseChaos();
   const safeDuration = Math.max(60, Math.min(3600, Number(durationSeconds || 300)));
   const untilMs = Date.now() + safeDuration * 1000;
+  const stressWorkers = anomalyMode ? 8 : 5;
+  const stressSeriesSize = anomalyMode ? 600000 : 420000;
 
   const lockSql = `
     SET application_name = ${quoteSqlLiteral(`${DB_ROOT_CAUSE_APP_PREFIX}_lock`)};
     BEGIN;
-    LOCK TABLE users IN ACCESS EXCLUSIVE MODE;
+    LOCK TABLE appointments, exams, patients IN ACCESS EXCLUSIVE MODE;
     SELECT pg_sleep(${safeDuration});
     COMMIT;
   `;
   await runPostgresSqlDetached(lockSql);
+
+  for (let i = 0; i < stressWorkers; i += 1) {
+    const stressSql = `
+      SET application_name = ${quoteSqlLiteral(`${DB_ROOT_CAUSE_APP_PREFIX}_stress`)};
+      DO $$
+      DECLARE
+        until_ts timestamptz := clock_timestamp() + make_interval(secs => ${safeDuration});
+      BEGIN
+        WHILE clock_timestamp() < until_ts LOOP
+          PERFORM sum((g::bigint * 31) % 97)
+          FROM generate_series(1, ${stressSeriesSize}) AS g;
+        END LOOP;
+      END $$;
+    `;
+    runPostgresSqlDetached(stressSql).catch(() => {
+      // no-op: worker pode terminar por timeout/encerramento durante reset
+    });
+    if (i % 2 === 1) {
+      await sleep(60);
+    }
+  }
 
   presetAuxState.dbChaosActiveUntilMs = untilMs;
   presetAuxState.dbChaosStopTimeout = setTimeout(() => {
@@ -385,9 +422,10 @@ async function startDbRootCauseChaos(durationSeconds, anomalyMode = false) {
 
   return {
     durationSeconds: safeDuration,
-    workerCount: 0,
-    lockTables: ["users"],
-    mode: "transaction_lock",
+    workerCount: stressWorkers,
+    lockTables: ["appointments", "exams", "patients"],
+    mode: "transaction_lock_plus_stress",
+    stressSeriesSize,
   };
 }
 
@@ -761,7 +799,7 @@ async function loginBackendAdmin() {
   for (const baseUrl of baseUrls) {
     let response;
     try {
-      response = await fetch(`${baseUrl}/api/auth/login`, {
+      response = await fetchWithTimeout(`${baseUrl}/api/auth/login`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -770,7 +808,7 @@ async function loginBackendAdmin() {
           email: DEFAULT_ADMIN_EMAIL,
           password: DEFAULT_ADMIN_PASSWORD,
         }),
-      });
+      }, BACKEND_HTTP_TIMEOUT_MS);
     } catch (error) {
       errors.push(`${baseUrl}: ${error.message}`);
       continue;
@@ -841,11 +879,11 @@ async function backendRequest(pathname, options = {}) {
   let responseBaseUrl = "";
   for (const baseUrl of baseUrls) {
     try {
-      response = await fetch(`${baseUrl}${pathname}`, {
+      response = await fetchWithTimeout(`${baseUrl}${pathname}`, {
         method,
         headers,
         body: payload !== undefined ? JSON.stringify(payload) : undefined,
-      });
+      }, BACKEND_HTTP_TIMEOUT_MS);
       responseBaseUrl = baseUrl;
       break;
     } catch (error) {
@@ -1585,7 +1623,7 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
       dbChaosLockTables: dbChaos.lockTables,
     },
     note:
-      "Banco degradado por lock + pressao de conexoes, mantendo frontend e backend ativos para Davis apontar causa raiz no banco.",
+      "Banco degradado por lock transacional em tabelas operacionais + stress SQL, mantendo frontend e backend ativos.",
   });
 }
 

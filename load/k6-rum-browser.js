@@ -520,6 +520,14 @@ async function tryDemoLogin(page, preferredRole) {
 async function apiFallbackDemoLogin(page, preferredRole) {
   const loginResult = await page
     .evaluate(async (storageKey, role) => {
+      const roleMap = {
+        patient: "Paciente",
+        doctor: "Medico",
+        receptionist: "Recepcao",
+        admin: "Admin",
+        nurse: "Enfermeiro",
+        lab: "Laboratorio",
+      };
       const usersResponse = await fetch(`/api/auth/demo-users?role=${role}&limit=24`).catch(() => null);
       if (!usersResponse || !usersResponse.ok) {
         return { ok: false, userTag: "" };
@@ -557,14 +565,20 @@ async function apiFallbackDemoLogin(page, preferredRole) {
         }),
       );
 
-      const roleSafe = String(payload.user.role || "usuario").trim() || "usuario";
+      const roleRaw = String(payload.user.role || "usuario").trim().toLowerCase();
+      const roleSafe = roleMap[roleRaw] || "Usuario";
       const identitySafe = String(
-        payload.user.full_name || payload.user.name || payload.user.email || payload.user.id || "desconhecido",
+        payload.user.full_name ||
+          payload.user.fullName ||
+          payload.user.name ||
+          payload.user.email ||
+          payload.user.id ||
+          "desconhecido",
       ).trim();
 
       return {
         ok: true,
-        userTag: identitySafe ? `${roleSafe}:${identitySafe}` : "",
+        userTag: identitySafe ? `${roleSafe}: ${identitySafe}` : "",
       };
     }, AUTH_STORAGE_KEY, preferredRole || "patient")
     .catch(() => ({ ok: false, userTag: "" }));
