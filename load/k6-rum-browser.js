@@ -1,7 +1,7 @@
 import { sleep } from "k6";
 import { browser } from "k6/browser";
 
-const FRONTEND_URL = __ENV.FRONTEND_URL || "http://frontend";
+const FRONTEND_URL = __ENV.FRONTEND_URL || "http://localhost:5173";
 const RUM_DURATION = __ENV.RUM_BROWSER_DURATION || "3m";
 const RUM_VUS = Number(__ENV.RUM_BROWSER_VUS || 5);
 
@@ -39,10 +39,14 @@ export default async function () {
   const page = await browser.newPage();
 
   try {
-    await page.goto(FRONTEND_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.goto(`${FRONTEND_URL}/login`, {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
     await page.waitForTimeout(500 + Math.random() * 1200);
 
     await clickIfVisible(page, [
+      "button:has-text('Acesso demonstracao')",
       "button:has-text('Login demo')",
       "button:has-text('Entrar demo')",
       "button:has-text('Entrar com demo')",
@@ -50,13 +54,13 @@ export default async function () {
 
     await page.waitForTimeout(300 + Math.random() * 900);
 
-    await clickIfVisible(page, [
-      "button:has-text('Paciente')",
-      "button:has-text('Médico')",
-      "button:has-text('Medico')",
-      "button:has-text('Recepção')",
-      "button:has-text('Recepcao')",
-    ]);
+    const demoUsers = page.locator(".demo-user-button");
+    const usersCount = await demoUsers.count();
+    if (usersCount > 0) {
+      const target = Math.floor(Math.random() * Math.min(usersCount, 12));
+      await demoUsers.nth(target).click().catch(() => {});
+      await page.waitForTimeout(500 + Math.random() * 1200);
+    }
 
     const paths = ["/jornadas", "/atendimentos", "/exames", "/operacoes", "/pacientes"];
     const hops = 2 + Math.floor(Math.random() * 3);
@@ -68,8 +72,8 @@ export default async function () {
       });
       await page.waitForTimeout(600 + Math.random() * 1500);
     }
-  } catch (_) {
-    // Errors are expected in stress runs; keep load going.
+  } catch (_error) {
+    // Erros sao esperados em testes de estresse.
   } finally {
     await page.close();
   }

@@ -266,6 +266,18 @@
         </section>
 
         <section class="panel">
+          <h2>Frontend RUM (navegador real)</h2>
+          <p class="tiny">
+            Esta carga abre navegador real, gera jornada no frontend e tambem chamadas para backend.
+          </p>
+          <div class="btn-row">
+            <button class="btn-primary" data-action="start" data-id="rum-front">Iniciar frontend RUM</button>
+            <button class="btn-neutral" data-action="stop" data-id="rum-front">Parar frontend RUM</button>
+          </div>
+          <p class="tiny" id="info-rum-front"></p>
+        </section>
+
+        <section class="panel">
           <h2>Cenarios de indisponibilidade</h2>
           <div class="card-grid">
             <article class="panel">
@@ -372,6 +384,7 @@
           { key: "frontend", label: "Frontend" },
           { key: "backend", label: "Backend API" },
           { key: "postgres", label: "PostgreSQL" },
+          { key: "rumBrowser", label: "RUM Browser" },
         ];
 
         statusGrid.innerHTML = entries
@@ -444,6 +457,7 @@
           setScenarioInfo("db", data.scenarios?.["db"]);
           setScenarioInfo("infra-cpu", data.scenarios?.["infra-cpu"]);
           setScenarioInfo("synthetic-load", data.scenarios?.["synthetic-load"]);
+          setScenarioInfo("rum-front", data.scenarios?.["rum-front"]);
           renderLoadState(data.load, data.loadError);
           refreshInfo.textContent = `Ultima atualizacao: ${new Date().toLocaleTimeString("pt-BR")}`;
         } catch (error) {

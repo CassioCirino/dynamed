@@ -14,6 +14,7 @@ const SESSION_TTL_SECONDS = Number(process.env.CONTROL_PANEL_SESSION_TTL_SECONDS
 const FRONTEND_CONTAINER = String(process.env.APP_FRONTEND_CONTAINER || "hospital-frontend").trim();
 const BACKEND_CONTAINER = String(process.env.APP_BACKEND_CONTAINER || "hospital-backend").trim();
 const POSTGRES_CONTAINER = String(process.env.APP_POSTGRES_CONTAINER || "hospital-postgres").trim();
+const RUM_BROWSER_CONTAINER = String(process.env.APP_RUM_BROWSER_CONTAINER || "hospital-rum-browser-load").trim();
 
 const BACKEND_INTERNAL_URL = String(process.env.BACKEND_INTERNAL_URL || "http://backend:4000").trim().replace(/\/$/, "");
 const DEFAULT_ADMIN_EMAIL = String(process.env.DEFAULT_ADMIN_EMAIL || "admin@hospital.local").trim();
@@ -28,6 +29,7 @@ const backendAuthCache = {
 };
 
 const LOAD_SCENARIO_ID = "synthetic-load";
+const RUM_SCENARIO_ID = "rum-front";
 const ALLOWED_LOAD_PROFILES = new Set(["light", "moderate", "heavy", "extreme", "custom"]);
 const ALLOWED_LOAD_ROLES = new Set(["patient", "doctor", "receptionist", "admin"]);
 const DEFAULT_LOAD_ROLES = ["patient", "doctor", "receptionist"];
@@ -153,6 +155,14 @@ async function stopContainerByName(containerName) {
 async function startContainerByName(containerName) {
   const container = docker.getContainer(containerName);
   await container.start();
+}
+
+function getErrorMessage(error) {
+  return String(error?.message || "").toLowerCase();
+}
+
+function isContainerNotFoundError(error) {
+  return getErrorMessage(error).includes("no such container");
 }
 
 function scenarioSnapshot() {
@@ -382,6 +392,59 @@ function syncLoadScenario(loadState) {
   });
 }
 
+function syncRumScenario(containers) {
+  const rum = containers?.[RUM_BROWSER_CONTAINER];
+  if (!rum || rum.state !== "running") {
+    scenarioState.delete(RUM_SCENARIO_ID);
+    return;
+  }
+
+  const current = scenarioState.get(RUM_SCENARIO_ID);
+  scenarioState.set(RUM_SCENARIO_ID, {
+    id: RUM_SCENARIO_ID,
+    type: "rum_browser",
+    running: true,
+    label: "Frontend RUM (navegador real)",
+    startedAt: current?.startedAt || new Date().toISOString(),
+    endsAtMs: 0,
+    details: {
+      container: RUM_BROWSER_CONTAINER,
+      status: rum.status || "running",
+    },
+    note: "Sessoes reais de navegador para alimentar frontend e backend.",
+  });
+}
+
+async function startRumBrowserScenario() {
+  try {
+    await startContainerByName(RUM_BROWSER_CONTAINER);
+  } catch (error) {
+    const message = getErrorMessage(error);
+    if (message.includes("is already running")) {
+      return;
+    }
+    if (isContainerNotFoundError(error)) {
+      throw new Error(
+        "Container de RUM nao encontrado. Execute uma vez: docker compose --profile rum up -d rum-browser-load",
+      );
+    }
+    throw error;
+  }
+}
+
+async function stopRumBrowserScenario() {
+  try {
+    await stopContainerByName(RUM_BROWSER_CONTAINER);
+  } catch (error) {
+    if (isContainerNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  } finally {
+    scenarioState.delete(RUM_SCENARIO_ID);
+  }
+}
+
 async function startLoadFromControlPanel(rawPayload) {
   const payload = buildLoadPayload(rawPayload || {});
   const data = await backendRequest("/api/operations/load/start", {
@@ -500,6 +563,7 @@ app.post("/api/login", (req, res) => {
 app.get("/api/status", requireAuth, async (_req, res, next) => {
   try {
     const containers = await getContainerStatusMap();
+    syncRumScenario(containers);
     let load = null;
     let loadError = null;
 
@@ -518,6 +582,7 @@ app.get("/api/status", requireAuth, async (_req, res, next) => {
         frontend: containers[FRONTEND_CONTAINER] || null,
         backend: containers[BACKEND_CONTAINER] || null,
         postgres: containers[POSTGRES_CONTAINER] || null,
+        rumBrowser: containers[RUM_BROWSER_CONTAINER] || null,
       },
       load,
       loadError,
@@ -653,6 +718,30 @@ app.post("/api/scenarios/load/stop", requireAuth, async (_req, res, next) => {
   }
 });
 
+app.post("/api/scenarios/rum-front/start", requireAuth, async (_req, res, next) => {
+  try {
+    await startRumBrowserScenario();
+    return res.json({
+      message: "Carga de frontend RUM iniciada.",
+      scenarios: scenarioSnapshot(),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+app.post("/api/scenarios/rum-front/stop", requireAuth, async (_req, res, next) => {
+  try {
+    await stopRumBrowserScenario();
+    return res.json({
+      message: "Carga de frontend RUM encerrada.",
+      scenarios: scenarioSnapshot(),
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
 app.post("/api/scenarios/stop-all", requireAuth, async (_req, res, next) => {
   try {
     await stopOutageScenario("dev-front");
@@ -665,6 +754,11 @@ app.post("/api/scenarios/stop-all", requireAuth, async (_req, res, next) => {
     }
     try {
       await stopLoadFromControlPanel();
+    } catch (_error) {
+      // no-op
+    }
+    try {
+      await stopRumBrowserScenario();
     } catch (_error) {
       // no-op
     }
