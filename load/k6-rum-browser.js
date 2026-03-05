@@ -124,10 +124,16 @@ function pickWeightedRole(weights) {
 
 const RUM_ROLE_WEIGHTS = parseRoleWeights(RUM_ROLE_WEIGHTS_RAW);
 
+async function countElements(page, selector) {
+  return page
+    .evaluate((sel) => document.querySelectorAll(sel).length, selector)
+    .catch(() => 0);
+}
+
 async function clickIfVisible(page, selectors) {
   for (const selector of selectors) {
-    const loc = page.locator(selector);
-    if ((await loc.count()) > 0) {
+    if ((await countElements(page, selector)) > 0) {
+      const loc = page.locator(selector);
       await loc.first().click().catch(() => {});
       return true;
     }
@@ -138,7 +144,7 @@ async function clickIfVisible(page, selectors) {
 async function waitForDemoUsers(page, timeoutMs = 12000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const count = await page.locator(".demo-user-button").count().catch(() => 0);
+    const count = await countElements(page, ".demo-user-button");
     if (count > 0) {
       return count;
     }
@@ -365,7 +371,7 @@ async function doLoggedInAction(page) {
   const strategy = Math.random();
 
   if (strategy < 0.45) {
-    const menuCount = await page.locator(".menu-link").count().catch(() => 0);
+    const menuCount = await countElements(page, ".menu-link");
     if (menuCount > 0) {
       const target = randomInt(0, menuCount - 1);
       await page.locator(".menu-link").nth(target).click({ timeout: 10000 }).catch(() => {});
