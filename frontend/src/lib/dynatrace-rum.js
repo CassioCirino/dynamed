@@ -10,9 +10,10 @@ function buildUserTag(user) {
     return "anonimo:visitante";
   }
   const role = String(user.role || "usuario").trim() || "usuario";
+  const fullName = String(user.full_name || user.name || "").trim();
   const email = String(user.email || "").trim();
   const id = String(user.id || "").trim();
-  const identity = email || id || "desconhecido";
+  const identity = fullName || email || id || "desconhecido";
   return `${role}:${identity}`;
 }
 

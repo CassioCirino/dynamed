@@ -9,6 +9,7 @@ const RUM_STEPS_MIN = Number(__ENV.RUM_BROWSER_STEPS_MIN || 5);
 const RUM_STEPS_MAX = Number(__ENV.RUM_BROWSER_STEPS_MAX || 12);
 const RUM_IDLE_MIN_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MIN_SECONDS || 20);
 const RUM_IDLE_MAX_SECONDS = Number(__ENV.RUM_BROWSER_IDLE_MAX_SECONDS || 90);
+const APP_PATHS = ["/", "/journeys", "/appointments", "/exams", "/operations", "/patients"];
 
 export const options = {
   scenarios: {
@@ -53,6 +54,44 @@ async function clickIfVisible(page, selectors) {
   return false;
 }
 
+async function waitForDemoUsers(page, timeoutMs = 12000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const count = await page.locator(".demo-user-button").count();
+    if (count > 0) {
+      return count;
+    }
+    await page.waitForTimeout(300);
+  }
+  return 0;
+}
+
+async function tryDemoLogin(page) {
+  await clickIfVisible(page, [
+    "button:has-text('Acesso demonstracao')",
+    "button:has-text('Login demo')",
+    "button:has-text('Entrar demo')",
+    "button:has-text('Entrar com demo')",
+  ]);
+
+  await page.waitForTimeout(350 + Math.random() * 800);
+  const usersCount = await waitForDemoUsers(page, 14000);
+  if (!usersCount) {
+    return false;
+  }
+
+  const target = Math.floor(Math.random() * Math.min(usersCount, 24));
+  await page.locator(".demo-user-button").nth(target).click().catch(() => {});
+
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await page.waitForTimeout(250);
+    if (!String(page.url() || "").includes("/login")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export default async function () {
   const page = await browser.newPage();
 
@@ -63,34 +102,29 @@ export default async function () {
     });
     await page.waitForTimeout(500 + Math.random() * 1200);
 
-    await clickIfVisible(page, [
-      "button:has-text('Acesso demonstracao')",
-      "button:has-text('Login demo')",
-      "button:has-text('Entrar demo')",
-      "button:has-text('Entrar com demo')",
-    ]);
-
     const shouldStayAnonymous = Math.random() < clamp(RUM_ANONYMOUS_RATE, 0, 1);
+    let isLoggedIn = false;
+
     if (!shouldStayAnonymous) {
-      await page.waitForTimeout(300 + Math.random() * 900);
-      const demoUsers = page.locator(".demo-user-button");
-      const usersCount = await demoUsers.count();
-      if (usersCount > 0) {
-        const target = Math.floor(Math.random() * Math.min(usersCount, 12));
-        await demoUsers.nth(target).click().catch(() => {});
-        await page.waitForTimeout(500 + Math.random() * 1200);
+      isLoggedIn = await tryDemoLogin(page);
+      if (!isLoggedIn) {
+        await page.goto(`${FRONTEND_URL}/login`, {
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
+        });
+        await page.waitForTimeout(400 + Math.random() * 900);
+        isLoggedIn = await tryDemoLogin(page);
       }
     }
 
-    const paths = ["/jornadas", "/atendimentos", "/exames", "/operacoes", "/pacientes"];
     const hops = randomInt(clamp(RUM_STEPS_MIN, 1, 50), clamp(RUM_STEPS_MAX, 1, 80));
     for (let i = 0; i < hops; i += 1) {
-      const path = pickRandom(paths);
+      const path = isLoggedIn ? pickRandom(APP_PATHS) : "/login";
       await page.goto(`${FRONTEND_URL}${path}`, {
         waitUntil: "domcontentloaded",
         timeout: 45000,
       });
-      await page.waitForTimeout(700 + Math.random() * 2400);
+      await page.waitForTimeout(900 + Math.random() * 2600);
     }
 
     const idleMin = clamp(RUM_IDLE_MIN_SECONDS, 1, 900);
