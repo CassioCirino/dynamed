@@ -33,6 +33,11 @@ const RUM_SCENARIO_ID = "rum-front";
 const ALLOWED_LOAD_PROFILES = new Set(["light", "moderate", "heavy", "extreme", "custom"]);
 const ALLOWED_LOAD_ROLES = new Set(["patient", "doctor", "receptionist", "admin"]);
 const DEFAULT_LOAD_ROLES = ["patient", "doctor", "receptionist"];
+const RUM_MAX_DURATION_MINUTES = 24 * 60;
+const rumScheduleState = {
+  startTimeout: null,
+  stopTimeout: null,
+};
 
 app.use(express.json({ limit: "128kb" }));
 app.use(express.static(path.join(__dirname, "..", "public")));
@@ -155,6 +160,201 @@ async function stopContainerByName(containerName) {
 async function startContainerByName(containerName) {
   const container = docker.getContainer(containerName);
   await container.start();
+}
+
+function clearRumScheduleTimers() {
+  if (rumScheduleState.startTimeout) {
+    clearTimeout(rumScheduleState.startTimeout);
+    rumScheduleState.startTimeout = null;
+  }
+  if (rumScheduleState.stopTimeout) {
+    clearTimeout(rumScheduleState.stopTimeout);
+    rumScheduleState.stopTimeout = null;
+  }
+}
+
+function compactObject(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => compactObject(item))
+      .filter((item) => item !== undefined);
+  }
+
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, nestedValue] of Object.entries(value)) {
+      const compacted = compactObject(nestedValue);
+      if (compacted !== undefined) {
+        out[key] = compacted;
+      }
+    }
+    return out;
+  }
+
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  return value;
+}
+
+function envListToMap(envList) {
+  const map = {};
+  for (const entry of Array.isArray(envList) ? envList : []) {
+    const raw = String(entry || "");
+    const idx = raw.indexOf("=");
+    if (idx <= 0) continue;
+    const key = raw.slice(0, idx);
+    const value = raw.slice(idx + 1);
+    map[key] = value;
+  }
+  return map;
+}
+
+function envMapToList(envMap) {
+  return Object.entries(envMap || {}).map(([key, value]) => `${key}=${String(value)}`);
+}
+
+function parseDateTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) return null;
+  return parsed;
+}
+
+function scheduleRumAutoStop(endAtMs) {
+  if (!Number.isFinite(endAtMs) || endAtMs <= Date.now()) {
+    return;
+  }
+
+  if (rumScheduleState.stopTimeout) {
+    clearTimeout(rumScheduleState.stopTimeout);
+  }
+
+  const delayMs = Math.max(1000, endAtMs - Date.now());
+  rumScheduleState.stopTimeout = setTimeout(async () => {
+    try {
+      await stopContainerByName(RUM_BROWSER_CONTAINER);
+    } catch (_error) {
+      // no-op
+    } finally {
+      scenarioState.delete(RUM_SCENARIO_ID);
+      rumScheduleState.stopTimeout = null;
+    }
+  }, delayMs);
+  rumScheduleState.stopTimeout.unref();
+}
+
+function buildRumRuntimeConfig(rawPayload) {
+  const payload = rawPayload || {};
+  const sessionsPerMinute = clampNumber(payload.sessionsPerMinute, 0, 1200, 0);
+  const vus = clampNumber(payload.vus, 1, 120, 3);
+  const durationMinutesInput = clampNumber(payload.durationMinutes, 1, RUM_MAX_DURATION_MINUTES, 60);
+
+  const startAtMs = parseDateTime(payload.startAt);
+  const requestedEndAtMs = parseDateTime(payload.endAt);
+  let durationMinutes = durationMinutesInput;
+  let endAtMs = null;
+
+  if (startAtMs && requestedEndAtMs && requestedEndAtMs > startAtMs) {
+    durationMinutes = Math.max(1, Math.ceil((requestedEndAtMs - startAtMs) / 60000));
+    endAtMs = requestedEndAtMs;
+  } else if (!startAtMs && requestedEndAtMs && requestedEndAtMs > Date.now()) {
+    durationMinutes = Math.max(1, Math.ceil((requestedEndAtMs - Date.now()) / 60000));
+    endAtMs = requestedEndAtMs;
+  }
+  durationMinutes = Math.min(RUM_MAX_DURATION_MINUTES, durationMinutes);
+
+  const env = {
+    RUM_BROWSER_DURATION: `${durationMinutes}m`,
+    RUM_BROWSER_VUS: String(vus),
+    RUM_BROWSER_SESSIONS_PER_MINUTE: String(sessionsPerMinute),
+  };
+
+  if (sessionsPerMinute > 0) {
+    const preAllocated = clampNumber(payload.preAllocatedVus, 1, 300, Math.max(2, Math.ceil(sessionsPerMinute / 2)));
+    const maxVus = clampNumber(payload.maxVus, preAllocated, 1000, Math.max(preAllocated + 2, sessionsPerMinute * 2));
+    env.RUM_BROWSER_PREALLOCATED_VUS = String(preAllocated);
+    env.RUM_BROWSER_MAX_VUS = String(maxVus);
+  }
+
+  return {
+    sessionsPerMinute,
+    vus,
+    durationMinutes,
+    startAtMs,
+    endAtMs,
+    env,
+  };
+}
+
+async function recreateRumBrowserContainer(envOverrides = {}) {
+  const container = docker.getContainer(RUM_BROWSER_CONTAINER);
+  let inspect;
+  try {
+    inspect = await container.inspect();
+  } catch (error) {
+    if (isContainerNotFoundError(error)) {
+      throw new Error(
+        "Container de RUM nao encontrado. Execute uma vez: docker compose --profile rum up -d rum-browser-load",
+      );
+    }
+    throw error;
+  }
+
+  const envMap = envListToMap(inspect?.Config?.Env || []);
+  Object.entries(envOverrides || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      envMap[key] = String(value);
+    }
+  });
+
+  const createOptions = compactObject({
+    name: RUM_BROWSER_CONTAINER,
+    Image: inspect?.Config?.Image,
+    Cmd: inspect?.Config?.Cmd,
+    Entrypoint: inspect?.Config?.Entrypoint,
+    Env: envMapToList(envMap),
+    Labels: inspect?.Config?.Labels || {},
+    WorkingDir: inspect?.Config?.WorkingDir,
+    User: inspect?.Config?.User,
+    HostConfig: {
+      AutoRemove: inspect?.HostConfig?.AutoRemove,
+      Binds: inspect?.HostConfig?.Binds || [],
+      NetworkMode: inspect?.HostConfig?.NetworkMode || "host",
+      RestartPolicy: inspect?.HostConfig?.RestartPolicy || { Name: "no" },
+      Privileged: inspect?.HostConfig?.Privileged,
+      CapAdd: inspect?.HostConfig?.CapAdd,
+      CapDrop: inspect?.HostConfig?.CapDrop,
+      ExtraHosts: inspect?.HostConfig?.ExtraHosts,
+      SecurityOpt: inspect?.HostConfig?.SecurityOpt,
+      ShmSize: inspect?.HostConfig?.ShmSize,
+      Tmpfs: inspect?.HostConfig?.Tmpfs,
+      Ulimits: inspect?.HostConfig?.Ulimits,
+      LogConfig: inspect?.HostConfig?.LogConfig,
+    },
+  });
+
+  try {
+    await container.stop({ t: 5 });
+  } catch (error) {
+    const message = getErrorMessage(error);
+    if (!message.includes("is not running") && !isContainerNotFoundError(error)) {
+      throw error;
+    }
+  }
+
+  try {
+    await container.remove({ force: true });
+  } catch (error) {
+    if (!isContainerNotFoundError(error)) {
+      throw error;
+    }
+  }
+
+  const created = await docker.createContainer(createOptions);
+  await created.start();
 }
 
 function getErrorMessage(error) {
@@ -394,45 +594,145 @@ function syncLoadScenario(loadState) {
 
 function syncRumScenario(containers) {
   const rum = containers?.[RUM_BROWSER_CONTAINER];
+  const current = scenarioState.get(RUM_SCENARIO_ID);
+
   if (!rum || rum.state !== "running") {
+    if (current?.details?.status === "scheduled" || current?.details?.status === "error") {
+      return;
+    }
     scenarioState.delete(RUM_SCENARIO_ID);
     return;
   }
 
-  const current = scenarioState.get(RUM_SCENARIO_ID);
+  const nowIso = new Date().toISOString();
   scenarioState.set(RUM_SCENARIO_ID, {
     id: RUM_SCENARIO_ID,
     type: "rum_browser",
     running: true,
     label: "Frontend RUM (navegador real)",
-    startedAt: current?.startedAt || new Date().toISOString(),
-    endsAtMs: 0,
+    startedAt: current?.startedAt || nowIso,
+    endsAtMs: Number(current?.endsAtMs || 0),
     details: {
+      mode: current?.details?.mode || "vus",
+      sessionsPerMinute: Number(current?.details?.sessionsPerMinute || 0),
+      vus: Number(current?.details?.vus || 0),
+      durationMinutes: Number(current?.details?.durationMinutes || 0),
+      status: "running",
       container: RUM_BROWSER_CONTAINER,
-      status: rum.status || "running",
+      containerStatus: rum.status || "running",
     },
     note: "Sessoes reais de navegador para alimentar frontend e backend.",
   });
 }
 
-async function startRumBrowserScenario() {
-  try {
-    await startContainerByName(RUM_BROWSER_CONTAINER);
-  } catch (error) {
-    const message = getErrorMessage(error);
-    if (message.includes("is already running")) {
-      return;
-    }
-    if (isContainerNotFoundError(error)) {
-      throw new Error(
-        "Container de RUM nao encontrado. Execute uma vez: docker compose --profile rum up -d rum-browser-load",
-      );
-    }
-    throw error;
+async function startRumBrowserScenario(rawPayload = {}) {
+  clearRumScheduleTimers();
+
+  const runtime = buildRumRuntimeConfig(rawPayload);
+  const nowMs = Date.now();
+  const hasFutureStart = Number.isFinite(runtime.startAtMs) && runtime.startAtMs > nowMs;
+  const startAtMs = hasFutureStart ? runtime.startAtMs : nowMs;
+  const endAtMs = runtime.endAtMs || startAtMs + runtime.durationMinutes * 60 * 1000;
+  const mode = runtime.sessionsPerMinute > 0 ? "sessions_per_minute" : "vus";
+
+  const baseDetails = {
+    mode,
+    sessionsPerMinute: runtime.sessionsPerMinute,
+    vus: runtime.vus,
+    durationMinutes: runtime.durationMinutes,
+    startAt: new Date(startAtMs).toISOString(),
+    endAt: new Date(endAtMs).toISOString(),
+    container: RUM_BROWSER_CONTAINER,
+  };
+
+  if (hasFutureStart) {
+    scenarioState.set(RUM_SCENARIO_ID, {
+      id: RUM_SCENARIO_ID,
+      type: "rum_browser",
+      running: false,
+      label: "Frontend RUM (navegador real)",
+      startedAt: new Date(startAtMs).toISOString(),
+      endsAtMs: endAtMs,
+      details: {
+        ...baseDetails,
+        status: "scheduled",
+      },
+      note: `Agendado para iniciar em ${new Date(startAtMs).toLocaleString("pt-BR")}.`,
+    });
+
+    const delayMs = Math.max(1000, startAtMs - nowMs);
+    rumScheduleState.startTimeout = setTimeout(async () => {
+      try {
+        await recreateRumBrowserContainer(runtime.env);
+        scenarioState.set(RUM_SCENARIO_ID, {
+          id: RUM_SCENARIO_ID,
+          type: "rum_browser",
+          running: true,
+          label: "Frontend RUM (navegador real)",
+          startedAt: new Date().toISOString(),
+          endsAtMs: endAtMs,
+          details: {
+            ...baseDetails,
+            status: "running",
+          },
+          note: "Frontend RUM em execucao.",
+        });
+        scheduleRumAutoStop(endAtMs);
+      } catch (error) {
+        scenarioState.set(RUM_SCENARIO_ID, {
+          id: RUM_SCENARIO_ID,
+          type: "rum_browser",
+          running: false,
+          label: "Frontend RUM (navegador real)",
+          startedAt: new Date(startAtMs).toISOString(),
+          endsAtMs: 0,
+          details: {
+            ...baseDetails,
+            status: "error",
+          },
+          note: `Falha ao iniciar RUM: ${error.message}`,
+        });
+      } finally {
+        rumScheduleState.startTimeout = null;
+      }
+    }, delayMs);
+    rumScheduleState.startTimeout.unref();
+    scheduleRumAutoStop(endAtMs);
+
+    return {
+      scheduled: true,
+      startAt: new Date(startAtMs).toISOString(),
+      endAt: new Date(endAtMs).toISOString(),
+      mode,
+    };
   }
+
+  await recreateRumBrowserContainer(runtime.env);
+  scenarioState.set(RUM_SCENARIO_ID, {
+    id: RUM_SCENARIO_ID,
+    type: "rum_browser",
+    running: true,
+    label: "Frontend RUM (navegador real)",
+    startedAt: new Date().toISOString(),
+    endsAtMs: endAtMs,
+    details: {
+      ...baseDetails,
+      status: "running",
+    },
+    note: "Frontend RUM em execucao.",
+  });
+  scheduleRumAutoStop(endAtMs);
+
+  return {
+    scheduled: false,
+    startAt: new Date(startAtMs).toISOString(),
+    endAt: new Date(endAtMs).toISOString(),
+    mode,
+  };
 }
 
 async function stopRumBrowserScenario() {
+  clearRumScheduleTimers();
   try {
     await stopContainerByName(RUM_BROWSER_CONTAINER);
   } catch (error) {
@@ -718,11 +1018,12 @@ app.post("/api/scenarios/load/stop", requireAuth, async (_req, res, next) => {
   }
 });
 
-app.post("/api/scenarios/rum-front/start", requireAuth, async (_req, res, next) => {
+app.post("/api/scenarios/rum-front/start", requireAuth, async (req, res, next) => {
   try {
-    await startRumBrowserScenario();
+    const result = await startRumBrowserScenario(req.body || {});
     return res.json({
-      message: "Carga de frontend RUM iniciada.",
+      message: result?.scheduled ? "Carga de frontend RUM agendada." : "Carga de frontend RUM iniciada.",
+      result,
       scenarios: scenarioSnapshot(),
     });
   } catch (error) {

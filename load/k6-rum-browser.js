@@ -4,7 +4,18 @@ import { Counter, Trend } from "k6/metrics";
 
 const FRONTEND_URL = __ENV.FRONTEND_URL || "http://localhost:5173";
 const RUM_DURATION = __ENV.RUM_BROWSER_DURATION || "20m";
-const RUM_VUS = clampNumber(Number(__ENV.RUM_BROWSER_VUS || 4), 1, 6);
+const RUM_VUS = clampNumber(Number(__ENV.RUM_BROWSER_VUS || 4), 1, 60);
+const RUM_SESSIONS_PER_MINUTE = clampNumber(Number(__ENV.RUM_BROWSER_SESSIONS_PER_MINUTE || 0), 0, 1200);
+const RUM_PREALLOCATED_VUS = clampNumber(
+  Number(__ENV.RUM_BROWSER_PREALLOCATED_VUS || Math.max(2, Math.ceil(RUM_SESSIONS_PER_MINUTE / 2)) || 4),
+  1,
+  300,
+);
+const RUM_MAX_VUS = clampNumber(
+  Number(__ENV.RUM_BROWSER_MAX_VUS || Math.max(RUM_PREALLOCATED_VUS + 2, Math.ceil(RUM_SESSIONS_PER_MINUTE * 2)) || 20),
+  RUM_PREALLOCATED_VUS,
+  1000,
+);
 const RUM_ANONYMOUS_RATE = clampNumber(Number(__ENV.RUM_BROWSER_ANONYMOUS_RATE || 0), 0, 1);
 const RUM_STEPS_MIN = clampNumber(Number(__ENV.RUM_BROWSER_STEPS_MIN || 12), 1, 120);
 const RUM_STEPS_MAX = clampNumber(Number(__ENV.RUM_BROWSER_STEPS_MAX || 28), RUM_STEPS_MIN, 160);
@@ -35,18 +46,35 @@ const iterationErrors = new Counter("rum_iteration_errors");
 const actionsPerIteration = new Trend("rum_actions_per_iteration");
 const durationPerIteration = new Trend("rum_iteration_duration_seconds");
 
+const browserOptions = {
+  browser: {
+    type: "chromium",
+  },
+};
+
+const rumScenario =
+  RUM_SESSIONS_PER_MINUTE > 0
+    ? {
+        executor: "constant-arrival-rate",
+        rate: RUM_SESSIONS_PER_MINUTE,
+        timeUnit: "1m",
+        preAllocatedVUs: RUM_PREALLOCATED_VUS,
+        maxVUs: RUM_MAX_VUS,
+        duration: RUM_DURATION,
+        gracefulStop: "30s",
+        options: browserOptions,
+      }
+    : {
+        executor: "constant-vus",
+        vus: RUM_VUS,
+        duration: RUM_DURATION,
+        gracefulStop: "30s",
+        options: browserOptions,
+      };
+
 export const options = {
   scenarios: {
-    frontend_rum: {
-      executor: "constant-vus",
-      vus: RUM_VUS,
-      duration: RUM_DURATION,
-      options: {
-        browser: {
-          type: "chromium",
-        },
-      },
-    },
+    frontend_rum: rumScenario,
   },
 };
 
@@ -141,6 +169,87 @@ async function clickIfVisible(page, selectors) {
   return false;
 }
 
+async function clickRandomMenuLink(page) {
+  const menuCount = await countElements(page, ".menu-link");
+  if (menuCount <= 0) {
+    return false;
+  }
+  const target = randomInt(0, menuCount - 1);
+  await page.locator(".menu-link").nth(target).click({ timeout: 12000 }).catch(() => {});
+  await page.waitForTimeout(500 + Math.random() * 1200);
+  return true;
+}
+
+async function selectDifferentOptionByIndex(page, selector, index = 0) {
+  const value = await page
+    .evaluate(
+      ({ sel, idx }) => {
+        const all = Array.from(document.querySelectorAll(sel));
+        const element = all[idx];
+        if (!element || element.tagName !== "SELECT") {
+          return "";
+        }
+        const select = element;
+        const options = Array.from(select.options)
+          .map((item) => item.value)
+          .filter((item) => item !== select.value);
+        if (!options.length) {
+          return "";
+        }
+        return options[Math.floor(Math.random() * options.length)];
+      },
+      { sel: selector, idx: index },
+    )
+    .catch(() => "");
+
+  if (!value) {
+    return false;
+  }
+
+  const target = page.locator(selector).nth(index);
+  await target.selectOption(value).catch(async () => {
+    await page
+      .evaluate(
+        ({ sel, idx, val }) => {
+          const all = Array.from(document.querySelectorAll(sel));
+          const element = all[idx];
+          if (!element || element.tagName !== "SELECT") {
+            return;
+          }
+          element.value = val;
+          element.dispatchEvent(new Event("change", { bubbles: true }));
+        },
+        { sel: selector, idx: index, val: value },
+      )
+      .catch(() => {});
+  });
+  await page.waitForTimeout(350 + Math.random() * 1000);
+  return true;
+}
+
+async function fillInputIfVisible(page, selectors, value) {
+  for (const selector of selectors) {
+    if ((await countElements(page, selector)) <= 0) {
+      continue;
+    }
+    const target = page.locator(selector).first();
+    await target.click().catch(() => {});
+    await target.fill(String(value || "")).catch(() => {});
+    await page.waitForTimeout(250 + Math.random() * 700);
+    return true;
+  }
+  return false;
+}
+
+async function maybeScroll(page) {
+  if (Math.random() >= 0.7) {
+    return false;
+  }
+  await page.evaluate(() => window.scrollTo(0, Math.floor(Math.random() * document.body.scrollHeight))).catch(() => {});
+  await page.waitForTimeout(200 + Math.random() * 700);
+  return true;
+}
+
 async function waitForDemoUsers(page, timeoutMs = 12000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -200,11 +309,27 @@ async function ensureRumIdentify(page, userTag, timeoutMs = 10000) {
   while (Date.now() - startedAt < timeoutMs) {
     const identified = await page
       .evaluate((tag) => {
-        if (!window.dtrum || typeof window.dtrum.identifyUser !== "function") {
+        if (!window.dtrum) {
           return false;
         }
-        window.dtrum.identifyUser(tag);
-        return true;
+        let ok = false;
+        if (typeof window.dtrum.identifyUser === "function") {
+          window.dtrum.identifyUser(tag);
+          ok = true;
+        }
+        if (typeof window.dtrum.setUserTag === "function") {
+          window.dtrum.setUserTag(tag);
+          ok = true;
+        }
+        if (typeof window.dtrum.sendSessionProperties === "function") {
+          const role = String(tag || "").split(":")[0] || "usuario";
+          window.dtrum.sendSessionProperties({
+            userTag: tag,
+            userRole: role,
+          });
+          ok = true;
+        }
+        return ok;
       }, userTag)
       .catch(() => false);
 
@@ -368,61 +493,112 @@ async function apiFallbackDemoLogin(page, preferredRole) {
 }
 
 async function doLoggedInAction(page) {
-  const strategy = Math.random();
+  let performed = 0;
 
-  if (strategy < 0.45) {
-    const menuCount = await countElements(page, ".menu-link");
-    if (menuCount > 0) {
-      const target = randomInt(0, menuCount - 1);
-      await page.locator(".menu-link").nth(target).click({ timeout: 10000 }).catch(() => {});
-      await page.waitForTimeout(700 + Math.random() * 1600);
-      return true;
+  if (Math.random() < 0.8) {
+    if (await clickRandomMenuLink(page)) {
+      performed += 1;
     }
   }
 
-  if (strategy < 0.8) {
+  const currentUrl = String(page.url() || "");
+
+  if (currentUrl.includes("/journeys")) {
+    if (await clickIfVisible(page, [".journey-card button", "button:has-text('Ir para')"])) {
+      performed += 1;
+    }
+  } else if (currentUrl.includes("/appointments")) {
+    if (await selectDifferentOptionByIndex(page, ".page-header select", 0)) performed += 1;
+    if (await selectDifferentOptionByIndex(page, ".page-header select", 1)) performed += 1;
+    if (await selectDifferentOptionByIndex(page, ".table-panel tbody select", 0)) performed += 1;
+    if (await clickIfVisible(page, ["button.time-now-button", "button:has-text('Usar hora atual')"])) performed += 1;
+  } else if (currentUrl.includes("/exams")) {
+    if (await selectDifferentOptionByIndex(page, ".page-header select", 0)) performed += 1;
+    if (await selectDifferentOptionByIndex(page, ".table-panel tbody select", 0)) performed += 1;
+    if (await clickIfVisible(page, ["button:has-text('Solicitar')"])) performed += 1;
+  } else if (currentUrl.includes("/patients")) {
+    const searchValue = pickRandom(["ma", "jo", "ca", "dr", "sil", "sou"]);
+    if (await fillInputIfVisible(page, ["input[placeholder*='Buscar paciente']", ".page-header input"], searchValue)) {
+      performed += 1;
+    }
+    if (await clickIfVisible(page, [".list-panel li button", ".list-panel button"])) performed += 1;
+  } else if (currentUrl.includes("/operations")) {
+    if (await clickIfVisible(page, ["button:has-text('Atualizar agora')"])) performed += 1;
+    if (Math.random() < 0.15) {
+      if (
+        await fillInputIfVisible(
+          page,
+          [".form-grid input:first-of-type", "input[value*='Alerta manual']", ".form-grid input"],
+          `Alerta sintetico ${randomInt(10, 999)}`,
+        )
+      ) {
+        performed += 1;
+      }
+      if (await clickIfVisible(page, ["button:has-text('Registrar incidente')"])) performed += 1;
+    }
+  } else {
+    if (await clickIfVisible(page, ["button:has-text('Atualizar agora')", ".menu-link"])) {
+      performed += 1;
+    }
+  }
+
+  if (Math.random() < 0.3) {
     const path = pickRandom(APP_PATHS);
     await page.goto(`${FRONTEND_URL}${path}`, {
       waitUntil: "domcontentloaded",
       timeout: 45000,
     });
-    await page.waitForTimeout(900 + Math.random() * 1800);
-    return true;
+    await page.waitForTimeout(500 + Math.random() * 1200);
+    performed += 1;
   }
 
-  const clicked = await clickIfVisible(page, [
-    "button:has-text('Atualizar')",
-    "button:has-text('Buscar')",
-    "button:has-text('Filtrar')",
-    "button:has-text('Salvar')",
-    "button:has-text('Criar')",
-    ".panel button",
-    ".card button",
-  ]);
-
-  if (Math.random() < 0.75) {
-    await page.evaluate(() => window.scrollTo(0, Math.floor(Math.random() * document.body.scrollHeight))).catch(() => {});
+  if (await clickIfVisible(page, ["button:has-text('Atualizar')", "button:has-text('Buscar')", ".panel button"])) {
+    performed += 1;
   }
 
-  await page.waitForTimeout(450 + Math.random() * 1200);
-  return clicked || true;
+  if (await maybeScroll(page)) {
+    performed += 1;
+  }
+
+  return Math.max(1, performed);
 }
 
 async function doAnonymousAction(page) {
+  let performed = 0;
   await page.goto(`${FRONTEND_URL}/login`, {
     waitUntil: "domcontentloaded",
     timeout: 45000,
   });
+  performed += 1;
 
-  await page.waitForTimeout(450 + Math.random() * 1000);
-  await clickIfVisible(page, [
+  if (await clickIfVisible(page, [
     "button:has-text('Entrar com e-mail')",
     "button:has-text('Cadastrar paciente')",
     "button:has-text('Acesso demonstracao')",
-  ]);
+    ".auth-tabs .tab-button",
+  ])) {
+    performed += 1;
+  }
+
+  if (await fillInputIfVisible(page, ["input[type='email']", "input[placeholder*='e-mail']"], "anon@hospital.local")) {
+    performed += 1;
+  }
 
   await page.waitForTimeout(500 + Math.random() * 1000);
-  return true;
+  if (await clickIfVisible(page, [
+    "button:has-text('Entrar com e-mail')",
+    "button:has-text('Cadastrar paciente')",
+    "button:has-text('Acesso demonstracao')",
+  ])) {
+    performed += 1;
+  }
+
+  if (await maybeScroll(page)) {
+    performed += 1;
+  }
+
+  await page.waitForTimeout(450 + Math.random() * 1000);
+  return Math.max(1, performed);
 }
 
 async function openContextAndPage() {
@@ -522,14 +698,13 @@ export default async function () {
     while (actionCount < targetActions && attemptsLeft > 0) {
       attemptsLeft -= 1;
       if (loggedIn) {
-        await doLoggedInAction(page);
+        actionCount += await doLoggedInAction(page);
       } else {
         if (!anonymousAllowed) {
           throw new Error("anonymous_flow_blocked_by_configuration");
         }
-        await doAnonymousAction(page);
+        actionCount += await doAnonymousAction(page);
       }
-      actionCount += 1;
 
       if (loggedIn && userTag) {
         await ensureRumIdentify(page, userTag, 1200);

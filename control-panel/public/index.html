@@ -270,9 +270,31 @@
           <p class="tiny">
             Esta carga abre navegador real, gera jornada no frontend e tambem chamadas para backend.
           </p>
+          <div class="card-grid">
+            <label>
+              Sessoes por minuto (0 = modo VUs)
+              <input id="rumSessionsPerMinute" type="number" min="0" max="1200" value="0" />
+            </label>
+            <label>
+              VUs (quando sess/min = 0)
+              <input id="rumVus" type="number" min="1" max="120" value="3" />
+            </label>
+            <label>
+              Duracao (minutos)
+              <input id="rumDurationMinutes" type="number" min="1" max="1440" value="60" />
+            </label>
+            <label>
+              Inicio (opcional)
+              <input id="rumStartAt" type="datetime-local" />
+            </label>
+            <label>
+              Fim (opcional)
+              <input id="rumEndAt" type="datetime-local" />
+            </label>
+          </div>
           <div class="btn-row">
-            <button class="btn-primary" data-action="start" data-id="rum-front">Iniciar frontend RUM</button>
-            <button class="btn-neutral" data-action="stop" data-id="rum-front">Parar frontend RUM</button>
+            <button class="btn-primary" id="rumStartBtn">Iniciar frontend RUM</button>
+            <button class="btn-neutral" id="rumStopBtn">Parar frontend RUM</button>
           </div>
           <p class="tiny" id="info-rum-front"></p>
         </section>
@@ -379,6 +401,14 @@
         return rem ? `${min}min ${rem}s` : `${min}min`;
       }
 
+      function toIsoDateTime(rawValue) {
+        const value = String(rawValue || "").trim();
+        if (!value) return "";
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return "";
+        return parsed.toISOString();
+      }
+
       function renderContainerStatus(containers) {
         const entries = [
           { key: "frontend", label: "Frontend" },
@@ -413,6 +443,35 @@
           return;
         }
         target.textContent = `Ativo. Restante: ${formatRemaining(scenario.remainingSeconds)}.`;
+      }
+
+      function setRumScenarioInfo(scenario) {
+        const target = document.getElementById("info-rum-front");
+        if (!target) return;
+        if (!scenario) {
+          target.textContent = "Inativo.";
+          return;
+        }
+
+        const details = scenario.details || {};
+        const sessionsPerMinute = Number(details.sessionsPerMinute || 0);
+        const vus = Number(details.vus || 0);
+        const durationMinutes = Number(details.durationMinutes || 0);
+        const modeText = sessionsPerMinute > 0 ? `${sessionsPerMinute} sessoes/min` : `${vus} VUs`;
+
+        if (details.status === "error") {
+          target.textContent = scenario.note || "Falha ao iniciar o RUM.";
+          return;
+        }
+
+        if (!scenario.running || details.status === "scheduled") {
+          const startAt = details.startAt ? new Date(details.startAt).toLocaleString("pt-BR") : "-";
+          const endAt = details.endAt ? new Date(details.endAt).toLocaleString("pt-BR") : "-";
+          target.textContent = `Agendado | inicio=${startAt} | fim=${endAt} | carga=${modeText}.`;
+          return;
+        }
+
+        target.textContent = `Ativo. Restante: ${formatRemaining(scenario.remainingSeconds)} | carga=${modeText} | duracao=${durationMinutes}min.`;
       }
 
       function renderLoadState(load, loadError) {
@@ -457,7 +516,7 @@
           setScenarioInfo("db", data.scenarios?.["db"]);
           setScenarioInfo("infra-cpu", data.scenarios?.["infra-cpu"]);
           setScenarioInfo("synthetic-load", data.scenarios?.["synthetic-load"]);
-          setScenarioInfo("rum-front", data.scenarios?.["rum-front"]);
+          setRumScenarioInfo(data.scenarios?.["rum-front"]);
           renderLoadState(data.load, data.loadError);
           refreshInfo.textContent = `Ultima atualizacao: ${new Date().toLocaleTimeString("pt-BR")}`;
         } catch (error) {
@@ -522,6 +581,37 @@
             showMessage("error", error.message);
           }
         });
+      });
+
+      document.getElementById("rumStartBtn").addEventListener("click", async () => {
+        try {
+          const payload = {
+            sessionsPerMinute: Number(document.getElementById("rumSessionsPerMinute").value || 0),
+            vus: Number(document.getElementById("rumVus").value || 3),
+            durationMinutes: Number(document.getElementById("rumDurationMinutes").value || 60),
+          };
+
+          const startAt = toIsoDateTime(document.getElementById("rumStartAt").value);
+          const endAt = toIsoDateTime(document.getElementById("rumEndAt").value);
+          if (startAt) payload.startAt = startAt;
+          if (endAt) payload.endAt = endAt;
+
+          const result = await apiCall("/api/scenarios/rum-front/start", payload);
+          showMessage("ok", result.message || "Frontend RUM iniciado.");
+          await refreshStatus();
+        } catch (error) {
+          showMessage("error", error.message);
+        }
+      });
+
+      document.getElementById("rumStopBtn").addEventListener("click", async () => {
+        try {
+          const result = await apiCall("/api/scenarios/rum-front/stop", {});
+          showMessage("ok", result.message || "Frontend RUM encerrado.");
+          await refreshStatus();
+        } catch (error) {
+          showMessage("error", error.message);
+        }
       });
 
       document.getElementById("stopAllBtn").addEventListener("click", async () => {

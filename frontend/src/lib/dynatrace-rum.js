@@ -28,6 +28,34 @@ function clearRetryTimer() {
   }
 }
 
+function applyRumIdentity(rum, userTag) {
+  let applied = false;
+  if (!rum || !userTag) {
+    return false;
+  }
+
+  if (typeof rum.identifyUser === "function") {
+    rum.identifyUser(userTag);
+    applied = true;
+  }
+
+  if (typeof rum.setUserTag === "function") {
+    rum.setUserTag(userTag);
+    applied = true;
+  }
+
+  if (typeof rum.sendSessionProperties === "function") {
+    const role = userTag.split(":")[0] || "usuario";
+    rum.sendSessionProperties({
+      userTag,
+      userRole: role,
+    });
+    applied = true;
+  }
+
+  return applied;
+}
+
 function scheduleIdentify(attempt = 0) {
   if (!pendingUserTag) {
     clearRetryTimer();
@@ -35,14 +63,15 @@ function scheduleIdentify(attempt = 0) {
   }
 
   const rum = getRumApi();
-  if (rum && typeof rum.identifyUser === "function") {
+  if (rum) {
     try {
-      rum.identifyUser(pendingUserTag);
-      clearRetryTimer();
+      if (applyRumIdentity(rum, pendingUserTag)) {
+        clearRetryTimer();
+        return;
+      }
     } catch {
       // no-op: retry below if possible.
     }
-    return;
   }
 
   if (attempt >= MAX_RETRY_ATTEMPTS) {
