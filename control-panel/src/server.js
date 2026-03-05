@@ -133,6 +133,11 @@ function clampNumber(value, min, max, fallback = null) {
   return Math.max(min, Math.min(max, parsed));
 }
 
+function sleep(ms) {
+  const delayMs = Math.max(0, Number(ms || 0));
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 function normalizeLoadRoles(rawRoles) {
   const list = Array.isArray(rawRoles) ? rawRoles : [];
   const roles = list.map((item) => String(item || "").trim()).filter((role) => ALLOWED_LOAD_ROLES.has(role));
