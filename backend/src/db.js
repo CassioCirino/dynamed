@@ -1,5 +1,6 @@
 const { Pool } = require("pg");
 const { observeDbQuery, observeDbQueryError, observeDbReadiness } = require("./services/metrics");
+const { logger } = require("./logger");
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -10,6 +11,19 @@ const pool = new Pool({
           rejectUnauthorized: false,
         }
       : undefined,
+});
+
+// Prevent process crash on idle client disconnects / DB restarts.
+pool.on("error", (error) => {
+  logger.error(
+    {
+      error,
+      code: String(error?.code || ""),
+      message: String(error?.message || ""),
+      kind: classifyDbError(error),
+    },
+    "Pool PostgreSQL emitiu erro (conexao ociosa).",
+  );
 });
 
 async function query(text, params = []) {

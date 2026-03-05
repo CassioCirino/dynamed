@@ -1,5 +1,6 @@
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { Writable } = require("node:stream");
 const express = require("express");
 const Docker = require("dockerode");
 
@@ -14,7 +15,10 @@ const SESSION_TTL_SECONDS = Number(process.env.CONTROL_PANEL_SESSION_TTL_SECONDS
 const FRONTEND_CONTAINER = String(process.env.APP_FRONTEND_CONTAINER || "hospital-frontend").trim();
 const BACKEND_CONTAINER = String(process.env.APP_BACKEND_CONTAINER || "hospital-backend").trim();
 const POSTGRES_CONTAINER = String(process.env.APP_POSTGRES_CONTAINER || "hospital-postgres").trim();
+const POSTGRES_USER_NAME = String(process.env.POSTGRES_USER || "postgres").trim();
+const POSTGRES_DB_NAME = String(process.env.POSTGRES_DB || "hospital_sim").trim();
 const RUM_BROWSER_CONTAINER = String(process.env.APP_RUM_BROWSER_CONTAINER || "hospital-rum-browser-load").trim();
+const DB_ROOT_CAUSE_APP_PREFIX = "control_panel_db_root_cause";
 
 const BACKEND_INTERNAL_URL = String(process.env.BACKEND_INTERNAL_URL || "http://hospital-backend:4000")
   .trim()
@@ -63,8 +67,8 @@ const rumScheduleState = {
   stopTimeout: null,
 };
 const presetAuxState = {
-  dbCanaryInterval: null,
-  dbCanaryStopTimeout: null,
+  dbChaosStopTimeout: null,
+  dbChaosActiveUntilMs: 0,
 };
 
 app.use(express.json({ limit: "128kb" }));
@@ -254,6 +258,153 @@ async function ensureCoreServicesHealthy() {
   }
 }
 
+function quoteSqlLiteral(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function buildPostgresShellCommand(sql) {
+  const compactSql = String(sql || "").trim().replace(/\s+/g, " ");
+  const escapedSql = compactSql.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER_NAME}" -d "${POSTGRES_DB_NAME}" -c "${escapedSql}"`;
+}
+
+async function runExecInContainer(containerName, shellCommand, options = {}) {
+  const detach = Boolean(options?.detach);
+  const timeoutMs = Math.max(2000, Number(options?.timeoutMs || 20000));
+  const ignoreExitCode = Boolean(options?.ignoreExitCode);
+  const container = docker.getContainer(containerName);
+  const exec = await container.exec({
+    AttachStdout: !detach,
+    AttachStderr: !detach,
+    Tty: false,
+    Cmd: ["sh", "-lc", shellCommand],
+  });
+
+  if (detach) {
+    await exec.start({ Detach: true, Tty: false });
+    return { exitCode: 0, stdout: "", stderr: "" };
+  }
+
+  const stream = await exec.start({ Detach: false, Tty: false });
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  const stdoutStream = new Writable({
+    write(chunk, _encoding, callback) {
+      stdoutChunks.push(Buffer.from(chunk));
+      callback();
+    },
+  });
+  const stderrStream = new Writable({
+    write(chunk, _encoding, callback) {
+      stderrChunks.push(Buffer.from(chunk));
+      callback();
+    },
+  });
+  docker.modem.demuxStream(stream, stdoutStream, stderrStream);
+
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Exec em '${containerName}' excedeu timeout (${timeoutMs}ms).`));
+    }, timeoutMs);
+
+    const finish = (handler) => (value) => {
+      clearTimeout(timer);
+      handler(value);
+    };
+    stream.on("end", finish(resolve));
+    stream.on("close", finish(resolve));
+    stream.on("error", finish(reject));
+  });
+
+  const inspect = await exec.inspect();
+  const exitCode = Number(inspect?.ExitCode || 0);
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
+  const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+  if (exitCode !== 0 && !ignoreExitCode) {
+    throw new Error(`Exec em '${containerName}' falhou (exit=${exitCode}): ${stderr || stdout || "sem detalhe"}`);
+  }
+
+  return { exitCode, stdout, stderr };
+}
+
+async function runPostgresSql(sql, options = {}) {
+  const command = buildPostgresShellCommand(sql);
+  return runExecInContainer(POSTGRES_CONTAINER, command, options);
+}
+
+async function runPostgresSqlDetached(sql) {
+  const command = buildPostgresShellCommand(sql);
+  return runExecInContainer(POSTGRES_CONTAINER, command, { detach: true });
+}
+
+function clearDbRootCauseTimers() {
+  if (presetAuxState.dbChaosStopTimeout) {
+    clearTimeout(presetAuxState.dbChaosStopTimeout);
+    presetAuxState.dbChaosStopTimeout = null;
+  }
+}
+
+async function stopDbRootCauseChaos() {
+  clearDbRootCauseTimers();
+  presetAuxState.dbChaosActiveUntilMs = 0;
+
+  const terminateSql = `
+    SELECT pg_terminate_backend(pid)
+    FROM pg_stat_activity
+    WHERE application_name LIKE ${quoteSqlLiteral(`${DB_ROOT_CAUSE_APP_PREFIX}%`)}
+      AND pid <> pg_backend_pid();
+  `;
+  try {
+    await runPostgresSql(terminateSql, { timeoutMs: 12000, ignoreExitCode: true });
+  } catch (_error) {
+    // no-op: pode falhar se o banco estiver realmente indisponivel
+  }
+}
+
+async function startDbRootCauseChaos(durationSeconds, anomalyMode = false) {
+  await stopDbRootCauseChaos();
+  const safeDuration = Math.max(60, Math.min(3600, Number(durationSeconds || 300)));
+  const untilMs = Date.now() + safeDuration * 1000;
+  const workerCount = anomalyMode ? 12 : 8;
+
+  const lockSql = `
+    SET application_name = ${quoteSqlLiteral(`${DB_ROOT_CAUSE_APP_PREFIX}_lock`)};
+    BEGIN;
+    LOCK TABLE appointments, exams, incidents IN ACCESS EXCLUSIVE MODE;
+    SELECT pg_sleep(${safeDuration});
+    COMMIT;
+  `;
+  await runPostgresSqlDetached(lockSql);
+
+  for (let i = 0; i < workerCount; i += 1) {
+    const connectionSql = `
+      SET application_name = ${quoteSqlLiteral(`${DB_ROOT_CAUSE_APP_PREFIX}_conn`)};
+      SELECT pg_sleep(${safeDuration});
+    `;
+    runPostgresSqlDetached(connectionSql).catch(() => {
+      // no-op: parte das conexoes pode falhar por limite atingido, o que e esperado
+    });
+    if (i % 8 === 7) {
+      await sleep(50);
+    }
+  }
+
+  presetAuxState.dbChaosActiveUntilMs = untilMs;
+  presetAuxState.dbChaosStopTimeout = setTimeout(() => {
+    stopDbRootCauseChaos().catch(() => {
+      // no-op
+    });
+  }, safeDuration * 1000 + 4000);
+  presetAuxState.dbChaosStopTimeout.unref();
+
+  return {
+    durationSeconds: safeDuration,
+    workerCount,
+    lockTables: ["appointments", "exams", "incidents"],
+    mode: "lock_and_connection_pressure",
+  };
+}
+
 function clearRumScheduleTimers() {
   if (rumScheduleState.startTimeout) {
     clearTimeout(rumScheduleState.startTimeout);
@@ -263,45 +414,6 @@ function clearRumScheduleTimers() {
     clearTimeout(rumScheduleState.stopTimeout);
     rumScheduleState.stopTimeout = null;
   }
-}
-
-function stopDbCanary() {
-  if (presetAuxState.dbCanaryInterval) {
-    clearInterval(presetAuxState.dbCanaryInterval);
-    presetAuxState.dbCanaryInterval = null;
-  }
-  if (presetAuxState.dbCanaryStopTimeout) {
-    clearTimeout(presetAuxState.dbCanaryStopTimeout);
-    presetAuxState.dbCanaryStopTimeout = null;
-  }
-}
-
-function startDbCanary(durationSeconds, intervalMs = 1000) {
-  stopDbCanary();
-  const safeIntervalMs = Math.max(300, Math.min(5000, Number(intervalMs || 1000)));
-  const safeDurationMs = Math.max(30000, Number(durationSeconds || 60) * 1000);
-  const endpoints = ["/api/dashboard/summary", "/api/patients?pageSize=20", "/health/ready"];
-  let index = 0;
-
-  presetAuxState.dbCanaryInterval = setInterval(async () => {
-    const endpoint = endpoints[index % endpoints.length];
-    index += 1;
-    try {
-      if (endpoint.startsWith("/api/")) {
-        await backendRequest(endpoint, { method: "GET", retryAuth: false });
-      } else {
-        await fetchWithTimeout(`${BACKEND_INTERNAL_URL}${endpoint}`, { method: "GET" }, 4000);
-      }
-    } catch (_error) {
-      // no-op: o objetivo e gerar evidencia continua de falha ligada ao banco
-    }
-  }, safeIntervalMs);
-  presetAuxState.dbCanaryInterval.unref();
-
-  presetAuxState.dbCanaryStopTimeout = setTimeout(() => {
-    stopDbCanary();
-  }, safeDurationMs + 2000);
-  presetAuxState.dbCanaryStopTimeout.unref();
 }
 
 function compactObject(value) {
@@ -632,7 +744,8 @@ async function startOutageScenario({ id, label, containerName, durationSeconds }
   });
 }
 
-async function stopOutageScenario(id) {
+async function stopOutageScenario(id, options = {}) {
+  const ignoreStartErrors = Boolean(options?.ignoreStartErrors);
   const current = scenarioState.get(id);
   if (!current) {
     return;
@@ -642,11 +755,17 @@ async function stopOutageScenario(id) {
     clearTimeout(current.timeoutRef);
   }
 
-  if (current.containerName) {
-    await startContainerByName(current.containerName);
+  try {
+    if (current.containerName) {
+      await startContainerByName(current.containerName);
+    }
+  } catch (error) {
+    if (!ignoreStartErrors) {
+      throw error;
+    }
+  } finally {
+    scenarioState.delete(id);
   }
-
-  scenarioState.delete(id);
 }
 
 async function loginBackendAdmin() {
@@ -1252,9 +1371,21 @@ async function disableSimulationJobScheduler() {
 }
 
 async function stopAllScenarios() {
-  await stopOutageScenario("dev-front");
-  await stopOutageScenario("dev-api");
-  await stopOutageScenario("db");
+  try {
+    await stopOutageScenario("dev-front", { ignoreStartErrors: true });
+  } catch (_error) {
+    // no-op
+  }
+  try {
+    await stopOutageScenario("dev-api", { ignoreStartErrors: true });
+  } catch (_error) {
+    // no-op
+  }
+  try {
+    await stopOutageScenario("db", { ignoreStartErrors: true });
+  } catch (_error) {
+    // no-op
+  }
   try {
     await stopCpuChaos();
   } catch (_error) {
@@ -1270,7 +1401,7 @@ async function stopAllScenarios() {
   } catch (_error) {
     // no-op
   }
-  stopDbCanary();
+  await stopDbRootCauseChaos();
   try {
     await disableSimulationJobScheduler();
   } catch (_error) {
@@ -1447,14 +1578,7 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
     rumSessionsPerMinute,
     enableRum: false,
   });
-
-  await startOutageScenario({
-    id: "db",
-    label: "Banco - PostgreSQL indisponivel",
-    containerName: POSTGRES_CONTAINER,
-    durationSeconds: safeDuration,
-  });
-  startDbCanary(safeDuration, anomalyMode ? 350 : 500);
+  const dbChaos = await startDbRootCauseChaos(safeDuration, anomalyMode);
 
   setTimedScenarioState({
     id: PRESET_ROOT_DB_SCENARIO_ID,
@@ -1468,11 +1592,13 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
       sessions,
       rumSessionsPerMinute: rumTraffic.rumSessionsPerMinute,
       rumVus: rumTraffic.rumVus,
-      dbCanaryIntervalMs: anomalyMode ? 350 : 500,
-      dbOutageSeconds: safeDuration,
+      dbChaosMode: dbChaos.mode,
+      dbChaosWorkers: dbChaos.workerCount,
+      dbChaosDurationSeconds: dbChaos.durationSeconds,
+      dbChaosLockTables: dbChaos.lockTables,
     },
     note:
-      "Somente o banco fica indisponivel; RUM fica desligado nesse preset para evitar 502 no :80 e destacar erro de banco no backend.",
+      "Banco degradado por lock + pressao de conexoes, mantendo frontend e backend ativos para Davis apontar causa raiz no banco.",
   });
 }
 
