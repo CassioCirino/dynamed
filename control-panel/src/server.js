@@ -1071,23 +1071,36 @@ async function stopAllScenarios() {
   scenarioState.delete(PRESET_ROOT_FRONTEND_SCENARIO_ID);
 }
 
-async function startPresetApiDegradada() {
-  const durationSeconds = 420;
-  await startApiErrorRateChaos({ percent: 35, durationSeconds });
-  await startApiLatencyChaos({ baseMs: 1800, jitterMs: 1200, durationSeconds });
-  await triggerCpuChaos({ seconds: 300, intensity: 0.92, workers: 4 });
+function resolvePresetDurationSeconds(rawOptions = {}, fallbackSeconds = 300) {
+  const explicitSeconds = clampNumber(rawOptions?.durationSeconds, 60, 14400, null);
+  if (explicitSeconds != null) {
+    return Math.round(explicitSeconds);
+  }
+  const explicitMinutes = clampNumber(rawOptions?.durationMinutes, 1, 240, null);
+  if (explicitMinutes != null) {
+    return Math.round(explicitMinutes * 60);
+  }
+  return Math.round(fallbackSeconds);
+}
+
+async function startPresetApiDegradada(durationSeconds = 300) {
+  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
+  const cpuSeconds = Math.max(60, Math.min(600, safeDuration));
+  await startApiErrorRateChaos({ percent: 35, durationSeconds: safeDuration });
+  await startApiLatencyChaos({ baseMs: 1800, jitterMs: 1200, durationSeconds: safeDuration });
+  await triggerCpuChaos({ seconds: cpuSeconds, intensity: 0.92, workers: 4 });
 
   setTimedScenarioState({
     id: PRESET_API_DEGRADADA_SCENARIO_ID,
     type: "preset_combo",
     label: "Preset - API degradada",
-    durationSeconds,
+    durationSeconds: safeDuration,
     details: {
       preset: "api-degradada",
       errorRatePercent: 35,
       latencyBaseMs: 1800,
       latencyJitterMs: 1200,
-      cpuSeconds: 300,
+      cpuSeconds,
       cpuIntensity: 0.92,
       cpuWorkers: 4,
     },
@@ -1095,12 +1108,12 @@ async function startPresetApiDegradada() {
   });
 }
 
-async function startPresetDbCarga() {
-  const durationSeconds = 300;
+async function startPresetDbCarga(durationSeconds = 300) {
+  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
   await startLoadFromControlPanel({
     profile: "heavy",
     sessions: 150,
-    durationSeconds,
+    durationSeconds: safeDuration,
     rampUpSeconds: 35,
     requestPacingMs: 1000,
     jitterMs: 450,
@@ -1110,32 +1123,32 @@ async function startPresetDbCarga() {
     id: "db",
     label: "Banco - PostgreSQL indisponivel",
     containerName: POSTGRES_CONTAINER,
-    durationSeconds,
+    durationSeconds: safeDuration,
   });
 
   setTimedScenarioState({
     id: PRESET_DB_CARGA_SCENARIO_ID,
     type: "preset_combo",
     label: "Preset - Banco indisponivel com carga",
-    durationSeconds,
+    durationSeconds: safeDuration,
     details: {
       preset: "db-carga",
       loadProfile: "heavy",
       sessions: 150,
-      dbOutageSeconds: durationSeconds,
+      dbOutageSeconds: safeDuration,
     },
     note: "Carga ativa e banco indisponivel para forcar erro/latencia no backend e frontend.",
   });
 }
 
-async function startPresetRootDb() {
-  const durationSeconds = 300;
+async function startPresetRootDb(durationSeconds = 300) {
+  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
   await stopAllScenarios();
 
   await startLoadFromControlPanel({
     profile: "moderate",
     sessions: 110,
-    durationSeconds,
+    durationSeconds: safeDuration,
     rampUpSeconds: 30,
     requestPacingMs: 1100,
     jitterMs: 400,
@@ -1146,46 +1159,46 @@ async function startPresetRootDb() {
     id: "db",
     label: "Banco - PostgreSQL indisponivel",
     containerName: POSTGRES_CONTAINER,
-    durationSeconds,
+    durationSeconds: safeDuration,
   });
 
   setTimedScenarioState({
     id: PRESET_ROOT_DB_SCENARIO_ID,
     type: "preset_root_cause",
     label: "Causa raiz - Banco",
-    durationSeconds,
+    durationSeconds: safeDuration,
     details: {
       target: "db",
       loadProfile: "moderate",
       sessions: 110,
-      dbOutageSeconds: durationSeconds,
+      dbOutageSeconds: safeDuration,
     },
     note: "Banco indisponivel com carga ativa para forcar erro com causa raiz no PostgreSQL.",
   });
 }
 
-async function startPresetRootBackend() {
-  const durationSeconds = 420;
+async function startPresetRootBackend(durationSeconds = 300) {
+  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
   await stopAllScenarios();
 
   await startLoadFromControlPanel({
     profile: "heavy",
     sessions: 140,
-    durationSeconds,
+    durationSeconds: safeDuration,
     rampUpSeconds: 35,
     requestPacingMs: 1000,
     jitterMs: 450,
     roles: ["patient", "doctor", "receptionist", "admin"],
   });
 
-  await startApiErrorRateChaos({ percent: 55, durationSeconds });
-  await startApiLatencyChaos({ baseMs: 2200, jitterMs: 900, durationSeconds });
+  await startApiErrorRateChaos({ percent: 55, durationSeconds: safeDuration });
+  await startApiLatencyChaos({ baseMs: 2200, jitterMs: 900, durationSeconds: safeDuration });
 
   setTimedScenarioState({
     id: PRESET_ROOT_BACKEND_SCENARIO_ID,
     type: "preset_root_cause",
     label: "Causa raiz - Backend",
-    durationSeconds,
+    durationSeconds: safeDuration,
     details: {
       target: "backend",
       loadProfile: "heavy",
@@ -1198,65 +1211,72 @@ async function startPresetRootBackend() {
   });
 }
 
-async function startPresetRootFrontend() {
-  const durationSeconds = 300;
+async function startPresetRootFrontend(durationSeconds = 300) {
+  const safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
   await stopAllScenarios();
 
   await startOutageScenario({
     id: "dev-front",
     label: "DEV - Frontend indisponivel",
     containerName: FRONTEND_CONTAINER,
-    durationSeconds,
+    durationSeconds: safeDuration,
   });
 
   setTimedScenarioState({
     id: PRESET_ROOT_FRONTEND_SCENARIO_ID,
     type: "preset_root_cause",
     label: "Causa raiz - Frontend",
-    durationSeconds,
+    durationSeconds: safeDuration,
     details: {
       target: "frontend",
-      frontendOutageSeconds: durationSeconds,
+      frontendOutageSeconds: safeDuration,
     },
     note: "Indisponibilidade direta do frontend para causa raiz no servico web.",
   });
 }
 
-async function startPresetScenario(presetId) {
+async function startPresetScenario(presetId, options = {}) {
+  const durationSeconds = resolvePresetDurationSeconds(options, 300);
+  const durationMinutes = Math.round(durationSeconds / 60);
   const preset = String(presetId || "").trim();
   if (preset === "api-degradada") {
-    await startPresetApiDegradada();
+    await startPresetApiDegradada(durationSeconds);
     return {
       preset,
-      message: "Preset API degradada iniciado.",
+      durationMinutes,
+      message: `Preset API degradada iniciado por ${durationMinutes} min.`,
     };
   }
   if (preset === "db-carga") {
-    await startPresetDbCarga();
+    await startPresetDbCarga(durationSeconds);
     return {
       preset,
-      message: "Preset banco indisponivel com carga iniciado.",
+      durationMinutes,
+      message: `Preset banco indisponivel com carga iniciado por ${durationMinutes} min.`,
     };
   }
   if (preset === "root-db") {
-    await startPresetRootDb();
+    await startPresetRootDb(durationSeconds);
     return {
       preset,
-      message: "Preset de causa raiz Banco iniciado.",
+      durationMinutes,
+      message: `Preset de causa raiz Banco iniciado por ${durationMinutes} min.`,
     };
   }
   if (preset === "root-backend") {
-    await startPresetRootBackend();
+    await startPresetRootBackend(durationSeconds);
     return {
       preset,
-      message: "Preset de causa raiz Backend iniciado.",
+      durationMinutes,
+      message: `Preset de causa raiz Backend iniciado por ${durationMinutes} min.`,
     };
   }
   if (preset === "root-frontend") {
-    await startPresetRootFrontend();
+    await startPresetRootFrontend(durationSeconds);
     return {
       preset,
-      message: "Preset de causa raiz Frontend iniciado.",
+      durationMinutes,
+      message: `Preset de causa raiz Frontend iniciado por ${durationMinutes} min.`,
     };
   }
   throw new Error("Preset invalido.");
@@ -1474,7 +1494,7 @@ app.post("/api/scenarios/chaos/reset", requireAuth, async (_req, res, next) => {
 
 app.post("/api/scenarios/presets/start", requireAuth, async (req, res, next) => {
   try {
-    const result = await startPresetScenario(req.body?.preset);
+    const result = await startPresetScenario(req.body?.preset, req.body || {});
     return res.json({
       message: result.message,
       result,

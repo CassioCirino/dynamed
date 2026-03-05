@@ -303,9 +303,15 @@
           <h2>Cenarios pre-configurados (Dynatrace)</h2>
           <p class="tiny">Use os presets de causa raiz para forcar problema com origem clara: Banco, Backend ou Frontend.</p>
           <div class="card-grid">
+            <label>
+              Duracao dos presets (minutos)
+              <input id="presetDurationMinutes" type="number" min="1" max="240" value="5" />
+            </label>
+          </div>
+          <div class="card-grid">
             <article class="panel">
               <h3>Causa raiz - Banco</h3>
-              <p class="tiny">Carga moderada + PostgreSQL indisponivel por 5 minutos.</p>
+              <p class="tiny">Carga moderada + PostgreSQL indisponivel (duracao configuravel, padrao 5 min).</p>
               <div class="btn-row">
                 <button class="btn-danger" data-preset="root-db">Iniciar preset</button>
               </div>
@@ -314,7 +320,7 @@
 
             <article class="panel">
               <h3>Causa raiz - Backend</h3>
-              <p class="tiny">Carga alta + erro intermitente + latencia na API por 7 minutos.</p>
+              <p class="tiny">Carga alta + erro intermitente + latencia na API (duracao configuravel, padrao 5 min).</p>
               <div class="btn-row">
                 <button class="btn-danger" data-preset="root-backend">Iniciar preset</button>
               </div>
@@ -323,7 +329,7 @@
 
             <article class="panel">
               <h3>Causa raiz - Frontend</h3>
-              <p class="tiny">Frontend indisponivel por 5 minutos, backend e banco sem caos.</p>
+              <p class="tiny">Frontend indisponivel (duracao configuravel, padrao 5 min), backend e banco sem chaos.</p>
               <div class="btn-row">
                 <button class="btn-danger" data-preset="root-frontend">Iniciar preset</button>
               </div>
@@ -676,47 +682,58 @@
       });
 
       async function runPreset(presetId) {
+        const presetDurationMinutes = Math.max(
+          1,
+          Math.min(240, Number(document.getElementById("presetDurationMinutes")?.value || 5)),
+        );
+        const presetDurationSeconds = Math.round(presetDurationMinutes * 60);
+
         if (presetId === "api-error-30-5m") {
           return apiCall("/api/scenarios/chaos/error-rate/start", {
             percent: 30,
-            durationSeconds: 300,
+            durationSeconds: presetDurationSeconds,
           });
         }
         if (presetId === "api-latency-1200-800-5m") {
           return apiCall("/api/scenarios/chaos/latency/start", {
             baseMs: 1200,
             jitterMs: 800,
-            durationSeconds: 300,
+            durationSeconds: presetDurationSeconds,
           });
         }
         if (presetId === "db-outage-5m") {
           return apiCall("/api/scenarios/db/start", {
-            durationSeconds: 300,
+            durationSeconds: presetDurationSeconds,
           });
         }
         if (presetId === "combo-api-degradada") {
           return apiCall("/api/scenarios/presets/start", {
             preset: "api-degradada",
+            durationMinutes: presetDurationMinutes,
           });
         }
         if (presetId === "combo-db-carga") {
           return apiCall("/api/scenarios/presets/start", {
             preset: "db-carga",
+            durationMinutes: presetDurationMinutes,
           });
         }
         if (presetId === "root-db") {
           return apiCall("/api/scenarios/presets/start", {
             preset: "root-db",
+            durationMinutes: presetDurationMinutes,
           });
         }
         if (presetId === "root-backend") {
           return apiCall("/api/scenarios/presets/start", {
             preset: "root-backend",
+            durationMinutes: presetDurationMinutes,
           });
         }
         if (presetId === "root-frontend") {
           return apiCall("/api/scenarios/presets/start", {
             preset: "root-frontend",
+            durationMinutes: presetDurationMinutes,
           });
         }
         if (presetId === "preset-reset-total" || presetId === "api-chaos-reset") {
