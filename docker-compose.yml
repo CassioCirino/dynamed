@@ -98,7 +98,7 @@ services:
       APP_BACKEND_CONTAINER: hospital-backend
       APP_POSTGRES_CONTAINER: hospital-postgres
       BACKEND_INTERNAL_URL: http://hospital-backend:4000
-      BACKEND_INTERNAL_FALLBACK_URLS: http://backend:4000,http://hospital-backend:4000
+      BACKEND_INTERNAL_FALLBACK_URLS: http://hospital-backend:4000
       CONTROL_PANEL_ENABLE_BACKEND_POLL: ${CONTROL_PANEL_ENABLE_BACKEND_POLL:-false}
       DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@hospital.local}
       DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-dyantrace}

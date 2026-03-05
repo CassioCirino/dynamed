@@ -20,7 +20,7 @@ const BACKEND_INTERNAL_URL = String(process.env.BACKEND_INTERNAL_URL || "http://
   .trim()
   .replace(/\/$/, "");
 const BACKEND_INTERNAL_FALLBACK_URLS = String(
-  process.env.BACKEND_INTERNAL_FALLBACK_URLS || "http://backend:4000,http://hospital-backend:4000",
+  process.env.BACKEND_INTERNAL_FALLBACK_URLS || "http://hospital-backend:4000",
 )
   .split(",")
   .map((item) => item.trim().replace(/\/$/, ""))
@@ -199,7 +199,50 @@ async function stopContainerByName(containerName) {
 
 async function startContainerByName(containerName) {
   const container = docker.getContainer(containerName);
-  await container.start();
+  try {
+    await container.start();
+  } catch (error) {
+    const message = String(error?.message || "").toLowerCase();
+    const statusCode = Number(error?.statusCode || error?.status || 0);
+    const alreadyRunning = statusCode === 304 || message.includes("already started") || message.includes("is already running");
+    if (!alreadyRunning) {
+      throw error;
+    }
+  }
+}
+
+async function waitForContainerHealthy(containerName, timeoutMs = 90000) {
+  const container = docker.getContainer(containerName);
+  const startedAt = Date.now();
+  let lastStatus = "sem status";
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const inspect = await container.inspect();
+      const running = Boolean(inspect?.State?.Running);
+      const stateStatus = String(inspect?.State?.Status || "unknown");
+      const healthStatus = String(inspect?.State?.Health?.Status || "n/a");
+      lastStatus = `state=${stateStatus} health=${healthStatus}`;
+      if (running && (healthStatus === "n/a" || healthStatus === "healthy")) {
+        return;
+      }
+    } catch (error) {
+      lastStatus = String(error?.message || "erro ao inspecionar container");
+    }
+    await sleep(1500);
+  }
+
+  throw new Error(`Container '${containerName}' nao ficou pronto a tempo (${lastStatus}).`);
+}
+
+async function ensureCoreServicesHealthy() {
+  const criticalContainers = [POSTGRES_CONTAINER, BACKEND_CONTAINER, FRONTEND_CONTAINER];
+  for (const containerName of criticalContainers) {
+    await startContainerByName(containerName);
+  }
+  for (const containerName of criticalContainers) {
+    await waitForContainerHealthy(containerName, 90000);
+  }
 }
 
 function clearRumScheduleTimers() {
@@ -1211,6 +1254,40 @@ function resolvePresetDurationSeconds(rawOptions = {}, fallbackSeconds = 300) {
   return Math.round(fallbackSeconds);
 }
 
+async function startEvidenceTraffic({
+  durationSeconds,
+  loadProfile,
+  loadSessions,
+  requestPacingMs,
+  jitterMs,
+  roles,
+  rumSessionsPerMinute,
+  rumVus = 3,
+}) {
+  await startLoadFromControlPanel({
+    profile: loadProfile,
+    sessions: loadSessions,
+    durationSeconds,
+    rampUpSeconds: 35,
+    requestPacingMs,
+    jitterMs,
+    roles,
+  });
+
+  const rumDurationMinutes = Math.max(1, Math.ceil(durationSeconds / 60));
+  await startRumBrowserScenario({
+    sessionsPerMinute: Math.max(1, Number(rumSessionsPerMinute || 1)),
+    vus: Math.max(1, Number(rumVus || 1)),
+    durationMinutes: rumDurationMinutes,
+  });
+
+  return {
+    rumDurationMinutes,
+    rumSessionsPerMinute: Math.max(1, Number(rumSessionsPerMinute || 1)),
+    rumVus: Math.max(1, Number(rumVus || 1)),
+  };
+}
+
 async function startPresetApiDegradada(durationSeconds = 300, anomalyMode = false) {
   let safeDuration = resolvePresetDurationSeconds({ durationSeconds }, 300);
   if (anomalyMode) {
@@ -1293,21 +1370,23 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
   if (anomalyMode) {
     safeDuration = Math.max(900, safeDuration);
   }
-  const profile = anomalyMode ? "heavy" : "moderate";
-  const sessions = anomalyMode ? 180 : 110;
-  const requestPacingMs = anomalyMode ? 900 : 1100;
-  const jitterMs = anomalyMode ? 300 : 400;
+  const profile = anomalyMode ? "extreme" : "heavy";
+  const sessions = anomalyMode ? 260 : 180;
+  const requestPacingMs = anomalyMode ? 750 : 950;
+  const jitterMs = anomalyMode ? 250 : 350;
+  const rumSessionsPerMinute = anomalyMode ? 26 : 16;
 
   await stopAllScenarios();
+  await ensureCoreServicesHealthy();
 
-  await startLoadFromControlPanel({
-    profile,
-    sessions,
+  const rumTraffic = await startEvidenceTraffic({
     durationSeconds: safeDuration,
-    rampUpSeconds: 30,
+    loadProfile: profile,
+    loadSessions: sessions,
     requestPacingMs,
     jitterMs,
     roles: ["patient", "doctor", "receptionist"],
+    rumSessionsPerMinute,
   });
 
   await startOutageScenario({
@@ -1327,9 +1406,11 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
       anomalyMode,
       loadProfile: profile,
       sessions,
+      rumSessionsPerMinute: rumTraffic.rumSessionsPerMinute,
+      rumVus: rumTraffic.rumVus,
       dbOutageSeconds: safeDuration,
     },
-    note: "Banco indisponivel com carga ativa para forcar erro com causa raiz no PostgreSQL.",
+    note: "Somente o banco fica indisponivel; frontend e backend seguem com carga para evidenciar causa raiz no PostgreSQL.",
   });
 }
 
@@ -1339,23 +1420,25 @@ async function startPresetRootBackend(durationSeconds = 300, anomalyMode = false
     safeDuration = Math.max(900, safeDuration);
   }
   const profile = anomalyMode ? "extreme" : "heavy";
-  const sessions = anomalyMode ? 240 : 140;
-  const requestPacingMs = anomalyMode ? 750 : 1000;
-  const jitterMs = anomalyMode ? 250 : 450;
+  const sessions = anomalyMode ? 280 : 180;
+  const requestPacingMs = anomalyMode ? 700 : 900;
+  const jitterMs = anomalyMode ? 250 : 380;
   const errorRatePercent = anomalyMode ? 75 : 55;
   const latencyBaseMs = anomalyMode ? 3200 : 2200;
   const latencyJitterMs = anomalyMode ? 1200 : 900;
+  const rumSessionsPerMinute = anomalyMode ? 24 : 14;
 
   await stopAllScenarios();
+  await ensureCoreServicesHealthy();
 
-  await startLoadFromControlPanel({
-    profile,
-    sessions,
+  const rumTraffic = await startEvidenceTraffic({
     durationSeconds: safeDuration,
-    rampUpSeconds: 35,
+    loadProfile: profile,
+    loadSessions: sessions,
     requestPacingMs,
     jitterMs,
     roles: ["patient", "doctor", "receptionist", "admin"],
+    rumSessionsPerMinute,
   });
 
   await startApiErrorRateChaos({ percent: errorRatePercent, durationSeconds: safeDuration });
@@ -1371,11 +1454,13 @@ async function startPresetRootBackend(durationSeconds = 300, anomalyMode = false
       anomalyMode,
       loadProfile: profile,
       sessions,
+      rumSessionsPerMinute: rumTraffic.rumSessionsPerMinute,
+      rumVus: rumTraffic.rumVus,
       errorRatePercent,
       latencyBaseMs,
       latencyJitterMs,
     },
-    note: "Erro e latencia na API com banco ativo para destacar causa raiz no backend.",
+    note: "Somente o backend recebe erro/latencia; banco e frontend continuam saudaveis com carga ativa.",
   });
 }
 
@@ -1384,7 +1469,24 @@ async function startPresetRootFrontend(durationSeconds = 300, anomalyMode = fals
   if (anomalyMode) {
     safeDuration = Math.max(900, safeDuration);
   }
+  const profile = anomalyMode ? "heavy" : "moderate";
+  const sessions = anomalyMode ? 150 : 95;
+  const requestPacingMs = anomalyMode ? 950 : 1200;
+  const jitterMs = anomalyMode ? 280 : 420;
+  const rumSessionsPerMinute = anomalyMode ? 26 : 18;
+
   await stopAllScenarios();
+  await ensureCoreServicesHealthy();
+
+  const rumTraffic = await startEvidenceTraffic({
+    durationSeconds: safeDuration,
+    loadProfile: profile,
+    loadSessions: sessions,
+    requestPacingMs,
+    jitterMs,
+    roles: ["patient", "doctor", "receptionist"],
+    rumSessionsPerMinute,
+  });
 
   await startOutageScenario({
     id: "dev-front",
@@ -1401,9 +1503,13 @@ async function startPresetRootFrontend(durationSeconds = 300, anomalyMode = fals
     details: {
       target: "frontend",
       anomalyMode,
+      loadProfile: profile,
+      sessions,
+      rumSessionsPerMinute: rumTraffic.rumSessionsPerMinute,
+      rumVus: rumTraffic.rumVus,
       frontendOutageSeconds: safeDuration,
     },
-    note: "Indisponibilidade direta do frontend para causa raiz no servico web.",
+    note: "Somente o frontend fica indisponivel; backend e banco permanecem ativos com carga para evidenciar causa raiz.",
   });
 }
 
