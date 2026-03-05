@@ -448,6 +448,7 @@ export default async function () {
   const startedAt = Date.now();
   const preferredRole = pickWeightedRole(RUM_ROLE_WEIGHTS);
   const shouldStayAnonymous = Math.random() < RUM_ANONYMOUS_RATE;
+  const anonymousAllowed = shouldStayAnonymous || RUM_ANONYMOUS_RATE > 0;
 
   let context = null;
   let page = null;
@@ -469,9 +470,9 @@ export default async function () {
 
     if (!shouldStayAnonymous) {
       for (let attempt = 0; attempt < 3 && !loggedIn; attempt += 1) {
-        let loginState = await tryDemoLogin(page, preferredRole);
+        let loginState = await apiFallbackDemoLogin(page, preferredRole);
         if (!loginState.loggedIn) {
-          loginState = await apiFallbackDemoLogin(page, preferredRole);
+          loginState = await tryDemoLogin(page, preferredRole);
         }
 
         loggedIn = loginState.loggedIn;
@@ -502,6 +503,14 @@ export default async function () {
       } else if (loggedIn) {
         identifyFailure.add(1);
       }
+
+      console.log(
+        `[rum-login] role=${preferredRole} loggedIn=${loggedIn} identify=${identifyOk} anonymousAllowed=${anonymousAllowed}`,
+      );
+
+      if (!loggedIn && !anonymousAllowed) {
+        throw new Error("login_failed_with_anonymous_disabled");
+      }
     }
 
     const targetActions = Math.max(RUM_MIN_ACTIONS, randomInt(RUM_STEPS_MIN, RUM_STEPS_MAX));
@@ -512,12 +521,21 @@ export default async function () {
       if (loggedIn) {
         await doLoggedInAction(page);
       } else {
+        if (!anonymousAllowed) {
+          throw new Error("anonymous_flow_blocked_by_configuration");
+        }
         await doAnonymousAction(page);
       }
       actionCount += 1;
 
       if (loggedIn && userTag) {
         await ensureRumIdentify(page, userTag, 1200);
+      }
+
+      if (actionCount % 5 === 0) {
+        console.log(
+          `[rum-step] role=${preferredRole} loggedIn=${loggedIn} identify=${identifyOk} actions=${actionCount}/${targetActions}`,
+        );
       }
     }
 
