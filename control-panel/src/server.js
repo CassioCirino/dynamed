@@ -1311,6 +1311,7 @@ async function startEvidenceTraffic({
   jitterMs,
   roles,
   rumSessionsPerMinute,
+  enableRum = true,
   rumVus = 3,
 }) {
   await startLoadFromControlPanel({
@@ -1322,6 +1323,14 @@ async function startEvidenceTraffic({
     jitterMs,
     roles,
   });
+
+  if (!enableRum || Number(rumSessionsPerMinute || 0) <= 0) {
+    return {
+      rumDurationMinutes: 0,
+      rumSessionsPerMinute: 0,
+      rumVus: 0,
+    };
+  }
 
   const rumDurationMinutes = Math.max(1, Math.ceil(durationSeconds / 60));
   await startRumBrowserScenario({
@@ -1419,11 +1428,11 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
   if (anomalyMode) {
     safeDuration = Math.max(900, safeDuration);
   }
-  const profile = anomalyMode ? "extreme" : "heavy";
-  const sessions = anomalyMode ? 260 : 180;
-  const requestPacingMs = anomalyMode ? 750 : 950;
-  const jitterMs = anomalyMode ? 250 : 350;
-  const rumSessionsPerMinute = anomalyMode ? 2 : 1;
+  const profile = anomalyMode ? "heavy" : "moderate";
+  const sessions = anomalyMode ? 90 : 55;
+  const requestPacingMs = anomalyMode ? 950 : 1200;
+  const jitterMs = anomalyMode ? 220 : 320;
+  const rumSessionsPerMinute = 0;
 
   await stopAllScenarios();
   await ensureCoreServicesHealthy();
@@ -1436,6 +1445,7 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
     jitterMs,
     roles: ["patient", "doctor", "receptionist"],
     rumSessionsPerMinute,
+    enableRum: false,
   });
 
   await startOutageScenario({
@@ -1444,7 +1454,7 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
     containerName: POSTGRES_CONTAINER,
     durationSeconds: safeDuration,
   });
-  startDbCanary(safeDuration, anomalyMode ? 500 : 900);
+  startDbCanary(safeDuration, anomalyMode ? 350 : 500);
 
   setTimedScenarioState({
     id: PRESET_ROOT_DB_SCENARIO_ID,
@@ -1458,11 +1468,11 @@ async function startPresetRootDb(durationSeconds = 300, anomalyMode = false) {
       sessions,
       rumSessionsPerMinute: rumTraffic.rumSessionsPerMinute,
       rumVus: rumTraffic.rumVus,
-      dbCanaryIntervalMs: anomalyMode ? 500 : 900,
+      dbCanaryIntervalMs: anomalyMode ? 350 : 500,
       dbOutageSeconds: safeDuration,
     },
     note:
-      "Somente o banco fica indisponivel; backend recebe carga alta e canary de readiness para reforcar evidencia de causa raiz no PostgreSQL.",
+      "Somente o banco fica indisponivel; RUM fica desligado nesse preset para evitar 502 no :80 e destacar erro de banco no backend.",
   });
 }
 
