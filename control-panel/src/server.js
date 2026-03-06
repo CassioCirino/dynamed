@@ -18,6 +18,11 @@ const POSTGRES_CONTAINER = String(process.env.APP_POSTGRES_CONTAINER || "hospita
 const POSTGRES_USER_NAME = String(process.env.POSTGRES_USER || "postgres").trim();
 const POSTGRES_DB_NAME = String(process.env.POSTGRES_DB || "hospital_sim").trim();
 const RUM_BROWSER_CONTAINER = String(process.env.APP_RUM_BROWSER_CONTAINER || "hospital-rum-browser-load").trim();
+const RUM_BROWSER_IMAGE = String(process.env.RUM_BROWSER_IMAGE || "grafana/k6:0.54.0-with-browser").trim();
+const RUM_BROWSER_SCRIPT_PATH = String(process.env.RUM_BROWSER_SCRIPT_PATH || "/scripts/k6-rum-browser.js").trim();
+const RUM_BROWSER_LOAD_HOST_PATH = String(process.env.RUM_BROWSER_LOAD_HOST_PATH || "").trim();
+const PROJECT_ROOT_DIR = String(process.env.PROJECT_ROOT_DIR || "").trim();
+const FRONTEND_PUBLIC_PORT = Number(process.env.FRONTEND_PORT || 5173);
 const DB_ROOT_CAUSE_APP_PREFIX = "control_panel_db_root_cause";
 
 const BACKEND_INTERNAL_URL = String(process.env.BACKEND_INTERNAL_URL || "http://hospital-backend:4000")
@@ -633,15 +638,82 @@ async function recreateRumBrowserContainer(envOverrides = {}) {
   try {
     inspect = await container.inspect();
   } catch (error) {
-    if (isContainerNotFoundError(error)) {
-      throw new Error(
-        "Container de RUM nao encontrado. Execute uma vez: docker compose --profile rum up -d rum-browser-load",
-      );
+    if (!isContainerNotFoundError(error)) {
+      throw error;
     }
-    throw error;
+    inspect = null;
   }
 
-  const envMap = envListToMap(inspect?.Config?.Env || []);
+  if (inspect) {
+    const envMap = envListToMap(inspect?.Config?.Env || []);
+    Object.entries(envOverrides || {}).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        envMap[key] = String(value);
+      }
+    });
+
+    const createOptions = compactObject({
+      name: RUM_BROWSER_CONTAINER,
+      Image: inspect?.Config?.Image,
+      Cmd: inspect?.Config?.Cmd,
+      Entrypoint: inspect?.Config?.Entrypoint,
+      Env: envMapToList(envMap),
+      Labels: inspect?.Config?.Labels || {},
+      WorkingDir: inspect?.Config?.WorkingDir,
+      User: inspect?.Config?.User,
+      HostConfig: {
+        AutoRemove: inspect?.HostConfig?.AutoRemove,
+        Binds: inspect?.HostConfig?.Binds || [],
+        NetworkMode: inspect?.HostConfig?.NetworkMode || "host",
+        RestartPolicy: inspect?.HostConfig?.RestartPolicy || { Name: "no" },
+        Privileged: inspect?.HostConfig?.Privileged,
+        CapAdd: inspect?.HostConfig?.CapAdd,
+        CapDrop: inspect?.HostConfig?.CapDrop,
+        ExtraHosts: inspect?.HostConfig?.ExtraHosts,
+        SecurityOpt: inspect?.HostConfig?.SecurityOpt,
+        ShmSize: inspect?.HostConfig?.ShmSize,
+        Tmpfs: inspect?.HostConfig?.Tmpfs,
+        Ulimits: inspect?.HostConfig?.Ulimits,
+        LogConfig: inspect?.HostConfig?.LogConfig,
+      },
+    });
+
+    try {
+      await container.stop({ t: 5 });
+    } catch (stopError) {
+      const message = getErrorMessage(stopError);
+      const statusCode = Number(stopError?.statusCode || stopError?.status || 0);
+      const alreadyStopped = statusCode === 304 || message.includes("already stopped") || message.includes("is not running");
+      if (!alreadyStopped && !isContainerNotFoundError(stopError)) {
+        throw stopError;
+      }
+    }
+
+    try {
+      await container.remove({ force: true });
+    } catch (removeError) {
+      if (!isContainerNotFoundError(removeError)) {
+        throw removeError;
+      }
+    }
+
+    const created = await docker.createContainer(createOptions);
+    await created.start();
+    return;
+  }
+
+  const bindSource = await resolveRumLoadBindSource();
+  if (!bindSource) {
+    throw new Error(
+      "Container RUM removido e caminho de scripts nao encontrado. Configure PROJECT_ROOT_DIR ou RUM_BROWSER_LOAD_HOST_PATH no control-panel.",
+    );
+  }
+
+  await ensureImageAvailable(RUM_BROWSER_IMAGE);
+  const envMap = {
+    FRONTEND_URL: `http://localhost:${FRONTEND_PUBLIC_PORT}`,
+    ...getRumBaselineEnv(),
+  };
   Object.entries(envOverrides || {}).forEach(([key, value]) => {
     if (value !== undefined && value !== null) {
       envMap[key] = String(value);
@@ -650,51 +722,78 @@ async function recreateRumBrowserContainer(envOverrides = {}) {
 
   const createOptions = compactObject({
     name: RUM_BROWSER_CONTAINER,
-    Image: inspect?.Config?.Image,
-    Cmd: inspect?.Config?.Cmd,
-    Entrypoint: inspect?.Config?.Entrypoint,
+    Image: RUM_BROWSER_IMAGE,
+    Cmd: ["run", RUM_BROWSER_SCRIPT_PATH],
+    Entrypoint: null,
     Env: envMapToList(envMap),
-    Labels: inspect?.Config?.Labels || {},
-    WorkingDir: inspect?.Config?.WorkingDir,
-    User: inspect?.Config?.User,
+    Labels: {
+      "com.dynamed.managed-by": "control-panel",
+      "com.dynamed.service": "rum-browser-load",
+    },
+    WorkingDir: null,
+    User: null,
     HostConfig: {
-      AutoRemove: inspect?.HostConfig?.AutoRemove,
-      Binds: inspect?.HostConfig?.Binds || [],
-      NetworkMode: inspect?.HostConfig?.NetworkMode || "host",
-      RestartPolicy: inspect?.HostConfig?.RestartPolicy || { Name: "no" },
-      Privileged: inspect?.HostConfig?.Privileged,
-      CapAdd: inspect?.HostConfig?.CapAdd,
-      CapDrop: inspect?.HostConfig?.CapDrop,
-      ExtraHosts: inspect?.HostConfig?.ExtraHosts,
-      SecurityOpt: inspect?.HostConfig?.SecurityOpt,
-      ShmSize: inspect?.HostConfig?.ShmSize,
-      Tmpfs: inspect?.HostConfig?.Tmpfs,
-      Ulimits: inspect?.HostConfig?.Ulimits,
-      LogConfig: inspect?.HostConfig?.LogConfig,
+      AutoRemove: false,
+      Binds: [`${bindSource}:/scripts:ro`],
+      NetworkMode: "host",
+      RestartPolicy: { Name: "no" },
     },
   });
-
-  try {
-    await container.stop({ t: 5 });
-  } catch (error) {
-    const message = getErrorMessage(error);
-    const statusCode = Number(error?.statusCode || error?.status || 0);
-    const alreadyStopped = statusCode === 304 || message.includes("already stopped") || message.includes("is not running");
-    if (!alreadyStopped && !isContainerNotFoundError(error)) {
-      throw error;
-    }
-  }
-
-  try {
-    await container.remove({ force: true });
-  } catch (error) {
-    if (!isContainerNotFoundError(error)) {
-      throw error;
-    }
-  }
-
   const created = await docker.createContainer(createOptions);
   await created.start();
+}
+
+async function ensureImageAvailable(imageName) {
+  const image = docker.getImage(imageName);
+  try {
+    await image.inspect();
+    return;
+  } catch (_error) {
+    // pull below
+  }
+
+  const stream = await docker.pull(imageName);
+  await new Promise((resolve, reject) => {
+    docker.modem.followProgress(stream, (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function resolveRumLoadBindSource() {
+  if (RUM_BROWSER_LOAD_HOST_PATH) {
+    return normalizeHostPath(RUM_BROWSER_LOAD_HOST_PATH);
+  }
+
+  if (PROJECT_ROOT_DIR) {
+    return normalizeHostPath(path.join(PROJECT_ROOT_DIR, "load"));
+  }
+
+  const candidates = [BACKEND_CONTAINER, FRONTEND_CONTAINER];
+  for (const candidate of candidates) {
+    try {
+      const inspect = await docker.getContainer(candidate).inspect();
+      const labels = inspect?.Config?.Labels || {};
+      const workingDir = String(labels["com.docker.compose.project.working_dir"] || "").trim();
+      if (workingDir) {
+        return normalizeHostPath(path.join(workingDir, "load"));
+      }
+    } catch (_error) {
+      // try next
+    }
+  }
+
+  return "";
+}
+
+function normalizeHostPath(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return "";
+  return trimmed.replace(/\\/g, "/");
 }
 
 function getErrorMessage(error) {

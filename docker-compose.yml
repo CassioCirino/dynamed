@@ -103,6 +103,8 @@ services:
       DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@hospital.local}
       DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-dyantrace}
       SIMULATION_CONTROL_KEY: ${SIMULATION_CONTROL_KEY:-troque-esta-chave-forte}
+      PROJECT_ROOT_DIR: ${PROJECT_ROOT_DIR:-}
+      RUM_BROWSER_LOAD_HOST_PATH: ${RUM_BROWSER_LOAD_HOST_PATH:-}
     ports:
       - "${CONTROL_PANEL_PORT:-5180}:4180"
     volumes:
