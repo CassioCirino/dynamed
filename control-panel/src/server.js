@@ -879,6 +879,7 @@ async function backendRequest(pathname, options = {}) {
     payload = undefined,
     requiresControlKey = false,
     retryAuth = true,
+    timeoutMs = BACKEND_HTTP_TIMEOUT_MS,
   } = options;
 
   if (requiresControlKey && !SIMULATION_CONTROL_KEY) {
@@ -907,7 +908,7 @@ async function backendRequest(pathname, options = {}) {
         method,
         headers,
         body: payload !== undefined ? JSON.stringify(payload) : undefined,
-      }, BACKEND_HTTP_TIMEOUT_MS);
+      }, timeoutMs);
       responseBaseUrl = baseUrl;
       break;
     } catch (error) {
@@ -1218,16 +1219,34 @@ async function startLoadFromControlPanel(rawPayload) {
 }
 
 async function stopLoadFromControlPanel(reason = "manual_stop_via_control_panel") {
-  const data = await backendRequest("/api/operations/load/stop", {
-    method: "POST",
-    payload: { reason },
-    requiresControlKey: true,
-  });
-  syncLoadScenario(data?.load || null);
+  const maxAttempts = 3;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const data = await backendRequest("/api/operations/load/stop", {
+        method: "POST",
+        payload: { reason },
+        requiresControlKey: true,
+        timeoutMs: Math.max(BACKEND_HTTP_TIMEOUT_MS, 25000),
+      });
+      syncLoadScenario(data?.load || null);
+      loadStateCache.atMs = Date.now();
+      loadStateCache.load = data?.load || null;
+      loadStateCache.error = null;
+      return data;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        await sleep(500 * attempt);
+      }
+    }
+  }
+
+  const message = `Falha ao encerrar carga backend: ${lastError?.message || "sem detalhe"}`;
   loadStateCache.atMs = Date.now();
-  loadStateCache.load = data?.load || null;
-  loadStateCache.error = null;
-  return data;
+  loadStateCache.error = message;
+  throw new Error(message);
 }
 
 async function triggerCpuChaos({ seconds, intensity, workers }) {
@@ -1418,53 +1437,28 @@ async function disableSimulationJobScheduler() {
   });
 }
 
-async function stopAllScenarios() {
-  try {
-    await stopOutageScenario("dev-front", { ignoreStartErrors: true });
-  } catch (_error) {
-    // no-op
-  }
-  try {
-    await stopOutageScenario("dev-api", { ignoreStartErrors: true });
-  } catch (_error) {
-    // no-op
-  }
-  try {
-    await stopOutageScenario("db", { ignoreStartErrors: true });
-  } catch (_error) {
-    // no-op
-  }
-  try {
-    await stopCpuChaos();
-  } catch (_error) {
-    // no-op
-  }
-  try {
-    await stopLoadFromControlPanel();
-  } catch (_error) {
-    // no-op
-  }
-  try {
-    await stopRumBrowserScenario();
-  } catch (_error) {
-    // no-op
-  }
-  await stopDbRootCauseChaos();
-  try {
-    await disableSimulationJobScheduler();
-  } catch (_error) {
-    // no-op
-  }
-  try {
-    await resetApiChaosScenarios();
-  } catch (_error) {
-    // no-op
-  }
-  try {
-    await ensureCoreServicesHealthy();
-  } catch (_error) {
-    // no-op
-  }
+async function stopAllScenarios(options = {}) {
+  const strict = Boolean(options?.strict);
+  const errors = [];
+  const runStep = async (label, fn) => {
+    try {
+      await fn();
+    } catch (error) {
+      errors.push(`${label}: ${error.message || error}`);
+    }
+  };
+
+  await runStep("dev-front", () => stopOutageScenario("dev-front", { ignoreStartErrors: true }));
+  await runStep("dev-api", () => stopOutageScenario("dev-api", { ignoreStartErrors: true }));
+  await runStep("db", () => stopOutageScenario("db", { ignoreStartErrors: true }));
+  await runStep("infra-cpu", () => stopCpuChaos());
+  await runStep("load", () => stopLoadFromControlPanel("manual_stop_via_control_panel"));
+  await runStep("rum", () => stopRumBrowserScenario());
+  await runStep("db-root-cause-chaos", () => stopDbRootCauseChaos());
+  await runStep("simulation-job", () => disableSimulationJobScheduler());
+  await runStep("api-chaos-reset", () => resetApiChaosScenarios());
+  await runStep("core-services-healthy", () => ensureCoreServicesHealthy());
+
   scenarioState.delete(PRESET_API_DEGRADADA_SCENARIO_ID);
   scenarioState.delete(PRESET_DB_CARGA_SCENARIO_ID);
   scenarioState.delete(PRESET_ROOT_DB_SCENARIO_ID);
@@ -1472,7 +1466,11 @@ async function stopAllScenarios() {
   scenarioState.delete(PRESET_ROOT_FRONTEND_SCENARIO_ID);
   loadStateCache.atMs = Date.now();
   loadStateCache.load = null;
-  loadStateCache.error = null;
+  loadStateCache.error = errors.length ? `Parada parcial: ${errors.join(" | ")}` : null;
+
+  if (strict && errors.length) {
+    throw new Error(`Parada geral parcial: ${errors.join(" | ")}`);
+  }
 }
 
 function resolvePresetDurationSeconds(rawOptions = {}, fallbackSeconds = 300) {
@@ -2028,7 +2026,7 @@ app.post("/api/scenarios/presets/start", requireAuth, async (req, res, next) => 
 
 app.post("/api/scenarios/presets/reset", requireAuth, async (_req, res, next) => {
   try {
-    await stopAllScenarios();
+    await stopAllScenarios({ strict: true });
     return res.json({
       message: "Reset geral executado (chaos, indisponibilidade e cargas).",
       scenarios: scenarioSnapshot(),
@@ -2091,7 +2089,7 @@ app.post("/api/scenarios/rum-front/stop", requireAuth, async (_req, res, next) =
 
 app.post("/api/scenarios/stop-all", requireAuth, async (_req, res, next) => {
   try {
-    await stopAllScenarios();
+    await stopAllScenarios({ strict: true });
     return res.json({
       message: "Todos os cenarios foram encerrados.",
       note: "Parada geral executada no painel de controle.",
