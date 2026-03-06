@@ -63,6 +63,20 @@ const ALLOWED_LOAD_PROFILES = new Set(["light", "moderate", "heavy", "extreme", 
 const ALLOWED_LOAD_ROLES = new Set(["patient", "doctor", "receptionist", "admin"]);
 const DEFAULT_LOAD_ROLES = ["patient", "doctor", "receptionist"];
 const RUM_MAX_DURATION_MINUTES = 24 * 60;
+const RUM_BASELINE_DEFAULTS = Object.freeze({
+  RUM_BROWSER_ANONYMOUS_RATE: "0",
+  RUM_BROWSER_STEPS_MIN: "10",
+  RUM_BROWSER_STEPS_MAX: "24",
+  RUM_BROWSER_MIN_ACTIONS: "10",
+  RUM_BROWSER_MIN_SESSION_SECONDS: "180",
+  RUM_BROWSER_ROLE_WEIGHTS: "patient:60,doctor:20,receptionist:15,admin:5",
+  RUM_BROWSER_IDLE_MIN_SECONDS: "45",
+  RUM_BROWSER_IDLE_MAX_SECONDS: "180",
+  RUM_BROWSER_USER_AGENT:
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+  K6_BROWSER_HEADLESS: "true",
+  K6_BROWSER_ARGS: "no-sandbox,disable-blink-features=AutomationControlled",
+});
 const rumScheduleState = {
   startTimeout: null,
   stopTimeout: null,
@@ -525,6 +539,15 @@ function parseK6DurationToMinutes(value) {
   return Math.max(1, Math.round(totalSeconds / 60));
 }
 
+function getRumBaselineEnv() {
+  const baseline = {};
+  for (const [key, fallback] of Object.entries(RUM_BASELINE_DEFAULTS)) {
+    const raw = String(process.env[key] || "").trim();
+    baseline[key] = raw || fallback;
+  }
+  return baseline;
+}
+
 function preferPositiveNumber(primaryValue, fallbackValue = 0) {
   const primary = Number(primaryValue || 0);
   if (Number.isFinite(primary) && primary > 0) {
@@ -581,6 +604,7 @@ function buildRumRuntimeConfig(rawPayload) {
   durationMinutes = Math.min(RUM_MAX_DURATION_MINUTES, durationMinutes);
 
   const env = {
+    ...getRumBaselineEnv(),
     RUM_BROWSER_DURATION: `${durationMinutes}m`,
     RUM_BROWSER_VUS: String(vus),
     RUM_BROWSER_SESSIONS_PER_MINUTE: String(sessionsPerMinute),
@@ -1433,6 +1457,11 @@ async function stopAllScenarios() {
   }
   try {
     await resetApiChaosScenarios();
+  } catch (_error) {
+    // no-op
+  }
+  try {
+    await ensureCoreServicesHealthy();
   } catch (_error) {
     // no-op
   }
