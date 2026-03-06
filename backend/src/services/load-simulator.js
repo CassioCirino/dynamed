@@ -57,6 +57,7 @@ const state = {
   stopReason: null,
   sessions: [],
   sessionPromises: [],
+  requestControllers: new Set(),
   stopTimer: null,
   stats: {
     loopsCompleted: 0,
@@ -127,8 +128,18 @@ function getBaseUrl() {
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const externalSignal = options?.signal || null;
   const controller = new AbortController();
+  const forwardAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener("abort", forwardAbort, { once: true });
+    }
+  }
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  state.requestControllers.add(controller);
   try {
     return await fetch(url, {
       ...options,
@@ -136,12 +147,26 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
     });
   } finally {
     clearTimeout(timeout);
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", forwardAbort);
+    }
+    state.requestControllers.delete(controller);
   }
 }
 
 function resetState() {
   if (state.stopTimer) {
     clearTimeout(state.stopTimer);
+  }
+  if (state.requestControllers.size > 0) {
+    for (const controller of state.requestControllers) {
+      try {
+        controller.abort();
+      } catch (_error) {
+        // no-op
+      }
+    }
+    state.requestControllers.clear();
   }
   state.running = false;
   state.config = null;
@@ -264,6 +289,9 @@ async function runRoleActions(baseUrl, role, token, userId) {
   }
 
   for (const action of actions) {
+    if (!state.running) {
+      break;
+    }
     try {
       state.stats.totalRequests += 1;
       const response = await fetchWithTimeout(`${baseUrl}${action.endpoint}`, {
@@ -334,6 +362,9 @@ async function runSession(session) {
       state.stats.successfulLogins += 1;
       state.stats.totalRequests += 1;
       recordSimulatedLoadRequest(session.role, "/auth/demo-login", "ok");
+      if (!state.running || !session.active) {
+        break;
+      }
       await runRoleActions(baseUrl, session.role, token, userId);
       state.stats.loopsCompleted += 1;
     } catch (error) {
@@ -360,6 +391,18 @@ async function stopLoadSimulation(reason = "manual_stop", triggeredBy = null) {
 
   state.running = false;
   state.stopReason = reason;
+  for (const session of state.sessions) {
+    session.active = false;
+  }
+  if (state.requestControllers.size > 0) {
+    for (const controller of state.requestControllers) {
+      try {
+        controller.abort();
+      } catch (_error) {
+        // no-op
+      }
+    }
+  }
   if (state.stopTimer) {
     clearTimeout(state.stopTimer);
     state.stopTimer = null;
@@ -427,6 +470,16 @@ async function startLoadSimulation(payload, triggeredBy = null) {
   state.stopReason = null;
   state.sessions = [];
   state.sessionPromises = [];
+  if (state.requestControllers.size > 0) {
+    for (const controller of state.requestControllers) {
+      try {
+        controller.abort();
+      } catch (_error) {
+        // no-op
+      }
+    }
+    state.requestControllers.clear();
+  }
   setSimulatedSessionsGauge(0);
 
   const rampDelayPerSession = config.rampUpSeconds > 0 ? (config.rampUpSeconds * 1000) / config.sessions : 0;

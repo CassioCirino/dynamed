@@ -1448,6 +1448,7 @@ async function stopAllScenarios(options = {}) {
     }
   };
 
+  await runStep("simulation-job", () => disableSimulationJobScheduler());
   await runStep("dev-front", () => stopOutageScenario("dev-front", { ignoreStartErrors: true }));
   await runStep("dev-api", () => stopOutageScenario("dev-api", { ignoreStartErrors: true }));
   await runStep("db", () => stopOutageScenario("db", { ignoreStartErrors: true }));
@@ -1455,9 +1456,9 @@ async function stopAllScenarios(options = {}) {
   await runStep("load", () => stopLoadFromControlPanel("manual_stop_via_control_panel"));
   await runStep("rum", () => stopRumBrowserScenario());
   await runStep("db-root-cause-chaos", () => stopDbRootCauseChaos());
-  await runStep("simulation-job", () => disableSimulationJobScheduler());
   await runStep("api-chaos-reset", () => resetApiChaosScenarios());
   await runStep("core-services-healthy", () => ensureCoreServicesHealthy());
+  await runStep("load-final-guard", () => stopLoadFromControlPanel("manual_stop_final_guard"));
 
   scenarioState.delete(PRESET_API_DEGRADADA_SCENARIO_ID);
   scenarioState.delete(PRESET_DB_CARGA_SCENARIO_ID);
